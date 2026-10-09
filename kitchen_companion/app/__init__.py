@@ -1,0 +1,1 @@
+"""Kitchen Companion application package."""

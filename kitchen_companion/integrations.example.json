@@ -1,0 +1,9 @@
+{
+  "mealie": {
+    "url": "http://mealie.example.invalid",
+    "token": "REPLACE_WITH_MEALIE_TOKEN"
+  },
+  "home_assistant": {
+    "script_entity_id": "script.replace_with_cooking_guide"
+  }
+}

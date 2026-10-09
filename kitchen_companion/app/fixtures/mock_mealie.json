@@ -1,0 +1,44 @@
+{
+  "recipes": [
+    {
+      "id": "mock-mealie-vegetable-soup",
+      "title": "架空の彩り野菜スープ",
+      "description": "StageでMealieの一覧・検索・工程表示を確認するための架空レシピです。",
+      "servings": 2,
+      "source_url": "",
+      "video_url": "",
+      "image_url": "assets/recipe-hero.png",
+      "ingredients": [
+        {"amount": 1, "unit": "個", "name": "架空にんじん", "note": ""},
+        {"amount": 300, "unit": "ml", "name": "水", "note": ""},
+        {"amount": null, "unit": "", "name": "塩", "note": "未確認"}
+      ],
+      "steps": [
+        "野菜を食べやすい大きさに切ります。",
+        "架空の鍋に水と野菜を入れて加熱します。",
+        "火の通りを確認し、塩の分量は出典未確認のため味見して調整します。"
+      ],
+      "tags": ["Stage", "架空データ", "スープ"]
+    },
+    {
+      "id": "mock-mealie-rice-bowl",
+      "title": "架空のきのこ丼",
+      "description": "検索と人数変更を確認するための、実在しないテスト用レシピです。",
+      "servings": 2,
+      "source_url": "",
+      "video_url": "",
+      "image_url": "",
+      "ingredients": [
+        {"amount": 2, "unit": "杯", "name": "ごはん", "note": ""},
+        {"amount": 200, "unit": "g", "name": "架空きのこ", "note": ""},
+        {"amount": null, "unit": "", "name": "調味料", "note": "未確認"}
+      ],
+      "steps": [
+        "架空きのこを食べやすい大きさに分けます。",
+        "フライパンで加熱し、調味料は未確認のまま勝手に補完しません。",
+        "ごはんに盛り付けます。"
+      ],
+      "tags": ["Stage", "架空データ", "丼"]
+    }
+  ]
+}

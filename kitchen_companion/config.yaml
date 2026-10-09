@@ -1,0 +1,25 @@
+name: Kitchen Companion
+version: "0.1.0"
+slug: kitchen_companion
+description: 音声と大きな画面で調理を案内する、タブレット向け料理アシスタント
+arch:
+  - aarch64
+  - amd64
+startup: application
+boot: auto
+init: false
+ingress: true
+ingress_port: 8099
+homeassistant_api: true
+panel_icon: mdi:chef-hat
+panel_title: 料理アシスタント
+panel_admin: false
+backup: cold
+stage: experimental
+map:
+  - type: app_config
+    read_only: true
+options:
+  mode: stage
+schema:
+  mode: list(stage|home_assistant)

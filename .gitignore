@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+.pytest_cache/
+.ruff_cache/
+.venv/
+.DS_Store
+docs/local/
+integrations.json
+/TASKS.md
+/HANDOFF.md
+/.autopilot-memory/
