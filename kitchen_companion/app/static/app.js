@@ -216,19 +216,50 @@ async function importFromUrl(event) {
   finally { button.disabled = false; button.textContent = "URLから読み込む"; }
 }
 
-function setupRecognition(button, onText) {
+function recognitionErrorMessage(code) {
+  const messages = {
+    "not-allowed": "マイク権限が許可されていません。Androidの設定でHome Assistantのマイクを許可してください",
+    "service-not-allowed": "この画面では音声認識サービスを利用できません。ChromeまたはGboardのマイク入力を試してください",
+    "audio-capture": "マイクを使用できません。他のアプリが使用中でないか確認してください",
+    "no-speech": "音声を検出できませんでした。マイクへ近づいてもう一度話してください",
+    network: "音声認識サービスへ接続できません。HTTPS接続またはChromeで試してください",
+  };
+  return messages[code] || "音声認識を開始できませんでした";
+}
+
+async function setupRecognition(button, onText) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) { showToast("この端末では音声入力を利用できません"); return; }
+  if (!window.isSecureContext) {
+    showToast("音声入力にはHTTPS接続が必要です。文字欄ではGboardのマイク入力を利用できます");
+    return;
+  }
   state.recognition?.abort();
+  if (navigator.mediaDevices?.getUserMedia) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+    } catch (error) {
+      const code = error?.name === "NotAllowedError" ? "not-allowed" : "audio-capture";
+      showToast(recognitionErrorMessage(code));
+      return;
+    }
+  }
   const recognition = new SpeechRecognition();
   recognition.lang = "ja-JP";
   recognition.interimResults = false;
   recognition.onstart = () => button.classList.add("listening");
   recognition.onend = () => button.classList.remove("listening");
-  recognition.onerror = () => showToast("音声を聞き取れませんでした");
+  recognition.onerror = (event) => {
+    if (event.error !== "aborted") showToast(recognitionErrorMessage(event.error));
+  };
   recognition.onresult = (event) => onText(event.results[0][0].transcript);
   state.recognition = recognition;
-  recognition.start();
+  try {
+    recognition.start();
+  } catch {
+    showToast("音声認識を開始できませんでした。文字欄ではGboardのマイク入力を利用できます");
+  }
 }
 
 function speak(text) {
@@ -407,6 +438,14 @@ $("#searchForm").addEventListener("submit", (event) => { event.preventDefault();
 $("#searchInput").addEventListener("input", (event) => { clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadRecipes(event.target.value), 250); });
 $("#voiceSearch").addEventListener("click", () => setupRecognition($("#voiceSearch"), (text) => { $("#searchInput").value = text; loadRecipes(text); }));
 $("#cookVoice").addEventListener("click", () => setupRecognition($("#cookVoice"), handleCookCommand));
+$("#cookCommandForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = $("#cookCommandInput");
+  const command = input.value.trim();
+  if (!command) return;
+  handleCookCommand(command);
+  input.value = "";
+});
 $("#recipeForm").addEventListener("submit", saveRecipe);
 $("#importForm").addEventListener("submit", importFromUrl);
 $("#prevStep").addEventListener("click", () => changeStep(-1));

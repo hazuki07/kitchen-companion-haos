@@ -108,6 +108,11 @@
         <p class="eyebrow">CURRENT STEP</p>
         <div class="step-number" id="stepNumber"></div>
         <p id="stepText"></p>
+        <form class="cook-command" id="cookCommandForm">
+          <label class="sr-only" for="cookCommandInput">調理コマンド</label>
+          <input id="cookCommandInput" type="text" enterkeyhint="send" placeholder="次へ・戻って・読み上げ・5分タイマー">
+          <button type="submit">実行</button>
+        </form>
         <div class="timer-panel">
           <div><span>タイマー</span><strong id="timerDisplay">00:00</strong></div>
           <div class="timer-presets"><button data-minutes="3">3分</button><button data-minutes="5">5分</button><button data-minutes="10">10分</button><button data-action="timer-stop">停止</button></div>
