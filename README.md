@@ -65,9 +65,14 @@ App設定の`mode`は既定で`stage`です。`home_assistant`への変更は、
 
 ## Home Assistant OSへ入れる
 
-このリポジトリはHome AssistantのローカルApp（旧称Add-on）形式です。初期版は公開リポジトリへ
-配布していないため、SambaまたはStudio Code Serverで`kitchen_companion`フォルダを
-`/addons/kitchen_companion`へ配置し、App Storeの確認メニューから再読み込みしてインストールします。
+Home AssistantのApp Storeでリポジトリ管理画面を開き、次のURLをカスタムリポジトリとして追加します。
+
+```text
+https://github.com/hazuki07/kitchen-companion-haos
+```
+
+一覧へ表示された`Kitchen Companion`をインストールします。初回はApp設定の`mode: stage`を維持し、
+実Home Assistant・Mealieへ接続しないモック状態で画面を確認してください。
 
 起動後はサイドバーの「料理アシスタント」から開けます。Ingressを使用するため、外部ポートは
 公開しません。SQLiteはApp専用の`/data`へ保存されますが、移行完了後もMealieを主保存先とします。
