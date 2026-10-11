@@ -33,6 +33,7 @@ class ExternalIntegrationConfig:
     mealie_url: str
     mealie_token: str = field(repr=False)
     script_entity_id: str
+    timer_script_entity_id: str
     home_assistant_url: str = "http://supervisor/core"
 
     @classmethod
@@ -51,12 +52,18 @@ class ExternalIntegrationConfig:
             mealie_url=str(mealie.get("url") or ""),
             mealie_token=str(mealie.get("token") or ""),
             script_entity_id=str(home_assistant.get("script_entity_id") or ""),
+            timer_script_entity_id=str(home_assistant.get("timer_script_entity_id") or ""),
         )
         UrllibJsonTransport(config.mealie_url, config.mealie_token)
+        home_assistant_transport = UrllibJsonTransport(
+            config.home_assistant_url,
+            os.environ.get("SUPERVISOR_TOKEN", ""),
+        )
         HomeAssistantCookingClient(
-            UrllibJsonTransport(config.home_assistant_url, os.environ.get("SUPERVISOR_TOKEN", "")),
+            home_assistant_transport,
             config.script_entity_id,
         )
+        HomeAssistantTimerClient(home_assistant_transport, config.timer_script_entity_id)
         return config
 
 
@@ -308,4 +315,35 @@ class HomeAssistantCookingClient:
             "text": steps[index],
             "speak": bool(speak),
             "speech_output": "home_assistant",
+        }
+
+
+class HomeAssistantTimerClient:
+    ACTIONS = {"start", "stop"}
+    MAX_MINUTES = 180
+
+    def __init__(self, transport: JsonTransport, script_entity_id: str):
+        if not re.fullmatch(r"script\.[a-z0-9_]+", script_entity_id):
+            raise ValueError("Home Assistant timer script entity IDが正しくありません")
+        self.transport = transport
+        self.service = script_entity_id.removeprefix("script.")
+
+    def perform(self, action: str, minutes: int) -> dict[str, Any]:
+        if action not in self.ACTIONS:
+            raise ValueError("タイマー操作が正しくありません")
+        if action == "start" and not 1 <= minutes <= self.MAX_MINUTES:
+            raise ValueError("タイマーは1分から180分で指定してください")
+        if action == "stop":
+            minutes = 0
+        self.transport.request(
+            "POST",
+            f"/api/services/script/{self.service}",
+            body={"operation": action, "minutes": minutes},
+        )
+        return {
+            "mode": "home_assistant",
+            "simulated": False,
+            "operation": action,
+            "minutes": minutes,
+            "alert_output": "alexa",
         }

@@ -71,3 +71,25 @@ class StageCookingController:
             "speak": bool(speak),
             "speech_output": "browser",
         }
+
+
+class StageTimerController:
+    """実Home Assistantへ接続せずタイマー操作の契約を検証する。"""
+
+    ACTIONS = {"start", "stop"}
+    MAX_MINUTES = 180
+
+    def perform(self, action: str, minutes: int) -> dict[str, Any]:
+        if action not in self.ACTIONS:
+            raise ValueError("タイマー操作が正しくありません")
+        if action == "start" and not 1 <= minutes <= self.MAX_MINUTES:
+            raise ValueError("タイマーは1分から180分で指定してください")
+        if action == "stop":
+            minutes = 0
+        return {
+            "mode": "stage",
+            "simulated": True,
+            "operation": action,
+            "minutes": minutes,
+            "alert_output": "browser",
+        }

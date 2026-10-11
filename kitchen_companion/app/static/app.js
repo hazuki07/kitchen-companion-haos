@@ -5,6 +5,7 @@ const state = {
   step: 0,
   timer: null,
   timerEnds: 0,
+  timerPending: false,
   recognition: null,
   editorImage: "",
   runtime: null,
@@ -70,6 +71,18 @@ function formatNumber(value) {
   return new Intl.NumberFormat("ja-JP", { maximumFractionDigits: 2 }).format(number);
 }
 
+function adjustServings(current, direction) {
+  const value = Number(current);
+  return Math.max(0.5, Math.round((value + direction * 0.5) * 2) / 2);
+}
+
+function formatServings(value) {
+  const number = Number(value);
+  if (Number.isInteger(number)) return formatNumber(number);
+  if (Number.isInteger(number * 2)) return `${Math.round(number * 2)}/2`;
+  return formatNumber(number);
+}
+
 function scaledIngredient(item, base, target, canScale = true) {
   if (item.amount == null) return item.note || "適量";
   if (!canScale) return `${formatNumber(item.amount)}${item.unit ? ` ${item.unit}` : ""}`;
@@ -96,7 +109,7 @@ function renderGrid() {
   grid.innerHTML = state.recipes.map((recipe) => {
     const image = safeUrl(recipe.image_url);
     const media = image ? `<img src="${escapeHtml(image)}" alt="" loading="lazy">` : '<div class="placeholder">♨</div>';
-    const servingLabel = recipe.servings_confirmed === false ? "人数未確認" : `${formatNumber(recipe.servings)}人分`;
+    const servingLabel = recipe.servings_confirmed === false ? "人数未確認" : `${formatServings(recipe.servings)}人分`;
     return `<article class="recipe-card">
       <div class="recipe-card-image">${media}<span>${servingLabel} · ${recipe.steps.length}工程</span></div>
       <div class="recipe-card-body"><h3>${escapeHtml(recipe.title)}</h3><p>${escapeHtml(recipe.description || "自分のレシピノート")}</p>
@@ -126,7 +139,7 @@ function renderDetail() {
     <div class="detail-hero">
       <div class="detail-image">${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(recipe.title)}">` : ""}</div>
       <div class="detail-copy"><p class="eyebrow">READY TO COOK</p><h1>${escapeHtml(recipe.title)}</h1><p>${escapeHtml(recipe.description)}</p>
-        <div class="serving-control">${servingsConfirmed ? `<button data-serving="-1" aria-label="人数を減らす">−</button><strong>${formatNumber(state.servings)}人分</strong><button data-serving="1" aria-label="人数を増やす">＋</button>` : "<strong>人数・換算は未確認</strong>"}</div>
+        <div class="serving-control">${servingsConfirmed ? `<button data-serving="-1" aria-label="人数を減らす">−</button><strong>${formatServings(state.servings)}人分</strong><button data-serving="1" aria-label="人数を増やす">＋</button>` : "<strong>人数・換算は未確認</strong>"}</div>
         <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button><button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button></div>
       </div>
     </div>
@@ -306,12 +319,43 @@ function handleCookCommand(text) {
   }
 }
 
-function startTimer(minutes) {
-  stopTimer(false);
-  state.timerEnds = Date.now() + minutes * 60_000;
-  updateTimer();
-  state.timer = setInterval(updateTimer, 250);
-  showToast(`${minutes}分タイマーを開始しました`);
+async function sendTimerAction(operation, minutes = 0) {
+  if (state.timerPending) throw new Error("タイマー操作を送信中です");
+  state.timerPending = true;
+  try {
+    return await api("/api/timer/action", {
+      method: "POST",
+      body: JSON.stringify({
+        request_id: newRequestId(),
+        operation,
+        minutes,
+      }),
+    });
+  } finally {
+    state.timerPending = false;
+  }
+}
+
+function resetLocalTimer() {
+  clearInterval(state.timer);
+  state.timer = null;
+  state.timerEnds = 0;
+  $("#timerDisplay").textContent = "00:00";
+}
+
+async function startTimer(minutes) {
+  try {
+    const result = await sendTimerAction("start", minutes);
+    resetLocalTimer();
+    state.timerEnds = Date.now() + minutes * 60_000;
+    updateTimer();
+    state.timer = setInterval(updateTimer, 250);
+    showToast(result.alert_output === "alexa"
+      ? `${minutes}分タイマーをAlexaへ送りました`
+      : `${minutes}分タイマーを開始しました`);
+  } catch (error) {
+    showToast(error.message);
+  }
 }
 
 function updateTimer() {
@@ -320,18 +364,20 @@ function updateTimer() {
   const secs = String(remaining % 60).padStart(2, "0");
   $("#timerDisplay").textContent = `${mins}:${secs}`;
   if (remaining === 0 && state.timer) {
-    stopTimer(false);
-    speak("タイマーが終了しました");
+    resetLocalTimer();
+    if (state.runtime?.mode !== "home_assistant") speak("タイマーが終了しました");
     showToast("タイマーが終了しました");
   }
 }
 
-function stopTimer(notify = true) {
-  clearInterval(state.timer);
-  state.timer = null;
-  state.timerEnds = 0;
-  $("#timerDisplay").textContent = "00:00";
-  if (notify) showToast("タイマーを停止しました");
+async function stopTimer(notify = true) {
+  try {
+    await sendTimerAction("stop");
+    resetLocalTimer();
+    if (notify) showToast("タイマーを停止しました");
+  } catch (error) {
+    showToast(error.message);
+  }
 }
 
 document.addEventListener("click", (event) => {
@@ -342,7 +388,7 @@ document.addEventListener("click", (event) => {
     if (recipe) openDetail(recipe);
   }
   if (target.dataset.query != null) { $("#searchInput").value = target.dataset.query; loadRecipes(target.dataset.query); }
-  if (target.dataset.serving) { state.servings = Math.max(.5, state.servings + Number(target.dataset.serving)); renderDetail(); }
+  if (target.dataset.serving) { state.servings = adjustServings(state.servings, Number(target.dataset.serving)); renderDetail(); }
   if (target.dataset.step != null) { state.step = Number(target.dataset.step); renderCookStep(); }
   if (target.dataset.minutes) startTimer(Number(target.dataset.minutes));
   const actions = {

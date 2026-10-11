@@ -15,11 +15,16 @@ from app.catalog import CombinedRecipeCatalog, MockMealieCatalog  # noqa: E402
 from app.clients import (  # noqa: E402
     ExternalIntegrationConfig,
     HomeAssistantCookingClient,
+    HomeAssistantTimerClient,
     IntegrationError,
     MealieImageClient,
     MealieReadClient,
 )
-from app.integrations import RuntimeConfig, StageCookingController  # noqa: E402
+from app.integrations import (  # noqa: E402
+    RuntimeConfig,
+    StageCookingController,
+    StageTimerController,
+)
 from app.server import (  # noqa: E402
     JsonLdParser,
     RecipeStore,
@@ -134,6 +139,12 @@ class RecipeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "工程操作"):
             StageCookingController().perform({"id": "fictional", "steps": ["切る。"]}, "delete", 1)
 
+    def test_stage_timer_action_is_simulated(self) -> None:
+        result = StageTimerController().perform("start", 5)
+        self.assertEqual(result["minutes"], 5)
+        self.assertEqual(result["alert_output"], "browser")
+        self.assertTrue(result["simulated"])
+
     def test_mock_mealie_catalog_is_read_only_and_searchable(self) -> None:
         fixture = ROOT / "kitchen_companion" / "app" / "fixtures" / "mock_mealie.json"
         catalog = MockMealieCatalog(fixture)
@@ -203,10 +214,36 @@ class RecipeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "entity ID"):
             HomeAssistantCookingClient(RecordingTransport([]), "light.kitchen")
 
+    def test_home_assistant_timer_calls_only_configured_script(self) -> None:
+        transport = RecordingTransport([[]])
+        client = HomeAssistantTimerClient(transport, "script.fictional_kitchen_timer")
+        result = client.perform("start", 5)
+        self.assertEqual(result["alert_output"], "alexa")
+        self.assertEqual(
+            transport.calls[0],
+            {
+                "method": "POST",
+                "path": "/api/services/script/fictional_kitchen_timer",
+                "query": None,
+                "body": {"operation": "start", "minutes": 5},
+            },
+        )
+
+    def test_home_assistant_timer_rejects_invalid_minutes(self) -> None:
+        client = HomeAssistantTimerClient(
+            RecordingTransport([]),
+            "script.fictional_kitchen_timer",
+        )
+        with self.assertRaisesRegex(ValueError, "1分から180分"):
+            client.perform("start", 0)
+
     def test_external_config_hides_fictional_token_from_repr(self) -> None:
         config_json = {
             "mealie": {"url": "https://mealie.example.invalid", "token": "fictional-secret"},
-            "home_assistant": {"script_entity_id": "script.fictional_cooking_guide"},
+            "home_assistant": {
+                "script_entity_id": "script.fictional_cooking_guide",
+                "timer_script_entity_id": "script.fictional_kitchen_timer",
+            },
         }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "integrations.json"
@@ -215,6 +252,7 @@ class RecipeTests(unittest.TestCase):
                 config = ExternalIntegrationConfig.load(path)
         self.assertNotIn("fictional-secret", repr(config))
         self.assertEqual(config.script_entity_id, "script.fictional_cooking_guide")
+        self.assertEqual(config.timer_script_entity_id, "script.fictional_kitchen_timer")
 
     def test_mealie_image_client_allows_only_images(self) -> None:
         transport = BinaryRecordingTransport("image/webp", b"fictional-image")

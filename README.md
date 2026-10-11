@@ -25,6 +25,7 @@ AndroidタブレットとHome Assistant OSで使う、個人向けの料理ア�
 - 1工程ずつ大きく表示する調理ナビ
 - ブラウザの音声入力と日本語読み上げ
 - 音声またはボタンでタイマーを開始
+- 実HAモードでは専用スクリプトへタイマー開始・停止を送り、Alexa発報へ接続可能
 - SQLiteへローカル下書きを保存
 - Stage専用の読み取り専用Mealieモックを検索・表示
 - Mealie画像を認証情報をブラウザへ渡さず同一オリジンで中継
@@ -57,6 +58,8 @@ Home Assistant Appとして動かす場合、HA認証は公式のSupervisorプ�
 
 MealieのURLとtoken、呼び出す料理工程scriptのentity IDは、Git管理外のApp設定ディレクトリにある
 `integrations.json`から読み取ります。形式は`kitchen_companion/integrations.example.json`を参照してください。
+Alexaタイマーは同じ設定の`timer_script_entity_id`へ`operation`と`minutes`を渡します。実際のAlexa
+通知先はHome Assistant側の専用scriptだけに固定し、AppやGit管理文書へ実entity IDを記録しません。
 Appにはこのディレクトリが読み取り専用でmountされます。tokenをリポジトリ、README、画面、ログへ
 貼り付けないでください。
 

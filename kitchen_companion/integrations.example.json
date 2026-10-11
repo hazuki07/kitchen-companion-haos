@@ -4,6 +4,7 @@
     "token": "REPLACE_WITH_MEALIE_TOKEN"
   },
   "home_assistant": {
-    "script_entity_id": "script.replace_with_cooking_guide"
+    "script_entity_id": "script.replace_with_cooking_guide",
+    "timer_script_entity_id": "script.replace_with_kitchen_timer"
   }
 }

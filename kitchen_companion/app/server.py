@@ -24,12 +24,13 @@ from .catalog import CombinedRecipeCatalog, MockMealieCatalog, RecipeReader
 from .clients import (
     ExternalIntegrationConfig,
     HomeAssistantCookingClient,
+    HomeAssistantTimerClient,
     IntegrationError,
     MealieImageClient,
     MealieReadClient,
     UrllibJsonTransport,
 )
-from .integrations import RuntimeConfig, StageCookingController
+from .integrations import RuntimeConfig, StageCookingController, StageTimerController
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -474,7 +475,8 @@ class AppHandler(BaseHTTPRequestHandler):
     store: RecipeStore
     catalog: RecipeReader
     runtime: RuntimeConfig
-    cooking: StageCookingController
+    cooking: StageCookingController | HomeAssistantCookingClient
+    timer: StageTimerController | HomeAssistantTimerClient
     images: MealieImageClient | None
 
     def log_message(self, fmt: str, *args: object) -> None:
@@ -577,6 +579,62 @@ class AppHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/import":
                 data = self.body()
                 self.json_response(import_recipe(str(data.get("url", ""))))
+            elif self.path == "/api/timer/action":
+                data = self.body()
+                request_id = str(data.get("request_id", ""))
+                try:
+                    if str(uuid.UUID(request_id)) != request_id:
+                        raise ValueError
+                except ValueError as exc:
+                    raise ValueError("request IDが正しくありません") from exc
+                operation = str(data.get("operation", ""))
+                try:
+                    minutes = int(data.get("minutes", 0))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("タイマー時間が正しくありません") from exc
+                if operation not in {"start", "stop"}:
+                    raise ValueError("タイマー操作が正しくありません")
+                if operation == "start" and not 1 <= minutes <= 180:
+                    raise ValueError("タイマーは1分から180分で指定してください")
+                if operation == "stop":
+                    minutes = 0
+                fingerprint = hashlib.sha256(
+                    json.dumps(
+                        ["timer", operation, minutes],
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                action_state, previous = self.store.begin_action(request_id, fingerprint)
+                if action_state == "completed":
+                    self.json_response({**(previous or {}), "replayed": True})
+                    return
+                if action_state in {"pending", "outcome_unknown"}:
+                    self.json_response(
+                        {
+                            "error": "前回のタイマー操作結果をHome Assistant側で確認してください",
+                            "request_id": request_id,
+                            "status": action_state,
+                        },
+                        409,
+                    )
+                    return
+                try:
+                    result = self.timer.perform(operation, minutes)
+                except Exception:
+                    self.store.mark_action_unknown(request_id)
+                    self.json_response(
+                        {
+                            "error": "タイマー操作結果を確認できないため自動再送を停止しました",
+                            "request_id": request_id,
+                            "status": "outcome_unknown",
+                        },
+                        502,
+                    )
+                    return
+                result["request_id"] = request_id
+                result["status"] = "completed"
+                self.store.finish_action(request_id, result)
+                self.json_response(result)
             elif self.path == "/api/cooking/action":
                 data = self.body()
                 request_id = str(data.get("request_id", ""))
@@ -697,6 +755,7 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
     if runtime.mode == "stage":
         recipe_reader: RecipeReader = MockMealieCatalog(MOCK_MEALIE_FIXTURE)
         cooking: StageCookingController | HomeAssistantCookingClient = StageCookingController()
+        timer: StageTimerController | HomeAssistantTimerClient = StageTimerController()
         images = None
     else:
         config_path = Path(os.environ.get("COOKING_ASSISTANT_EXTERNAL_CONFIG", "/config/integrations.json"))
@@ -705,6 +764,10 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
         cooking = HomeAssistantCookingClient(
             UrllibJsonTransport(external.home_assistant_url, os.environ.get("SUPERVISOR_TOKEN", "")),
             external.script_entity_id,
+        )
+        timer = HomeAssistantTimerClient(
+            UrllibJsonTransport(external.home_assistant_url, os.environ.get("SUPERVISOR_TOKEN", "")),
+            external.timer_script_entity_id,
         )
         images = MealieImageClient(
             UrllibJsonTransport(external.mealie_url, external.mealie_token)
@@ -718,6 +781,7 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
             "catalog": catalog,
             "runtime": runtime,
             "cooking": cooking,
+            "timer": timer,
             "images": images,
         },
     )
