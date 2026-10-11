@@ -7,6 +7,10 @@ const state = {
   timerEnds: 0,
   timerPending: false,
   recognition: null,
+  cookRecognition: null,
+  cookVoiceEnabled: false,
+  cookVoicePaused: false,
+  cookVoiceRestartTimer: null,
   editorImage: "",
   runtime: null,
 };
@@ -262,12 +266,117 @@ async function setupRecognition(button, onText) {
   }
 }
 
+function updateCookVoiceButton() {
+  const button = $("#cookVoice");
+  const enabled = state.cookVoiceEnabled;
+  button.classList.toggle("active", enabled);
+  button.setAttribute("aria-pressed", String(enabled));
+  button.setAttribute("aria-label", `音声操作を${enabled ? "OFF" : "ON"}にする`);
+  button.textContent = enabled ? "● 音声操作 ON" : "○ 音声操作 OFF";
+}
+
+function scheduleCookRecognition(delay = 250) {
+  clearTimeout(state.cookVoiceRestartTimer);
+  if (!state.cookVoiceEnabled || state.cookVoicePaused || $("#cookMode").classList.contains("hidden")) return;
+  state.cookVoiceRestartTimer = setTimeout(startCookRecognitionSession, delay);
+}
+
+function startCookRecognitionSession() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition || !state.cookVoiceEnabled || state.cookVoicePaused) return;
+
+  const recognition = new SpeechRecognition();
+  recognition.lang = "ja-JP";
+  recognition.continuous = true;
+  recognition.interimResults = false;
+  recognition.onstart = () => $("#cookVoice").classList.add("listening");
+  recognition.onresult = (event) => {
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      if (event.results[index].isFinal) handleCookCommand(event.results[index][0].transcript);
+    }
+  };
+  recognition.onerror = (event) => {
+    if (["not-allowed", "service-not-allowed", "audio-capture", "network"].includes(event.error)) {
+      state.cookVoiceEnabled = false;
+      showToast(recognitionErrorMessage(event.error));
+      updateCookVoiceButton();
+    } else if (!['aborted', 'no-speech'].includes(event.error)) {
+      showToast(recognitionErrorMessage(event.error));
+    }
+  };
+  recognition.onend = () => {
+    if (state.cookRecognition === recognition) state.cookRecognition = null;
+    $("#cookVoice").classList.remove("listening");
+    scheduleCookRecognition();
+  };
+  state.cookRecognition = recognition;
+  try {
+    recognition.start();
+  } catch {
+    state.cookRecognition = null;
+    scheduleCookRecognition(750);
+  }
+}
+
+async function enableCookVoice() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) { showToast("この端末では音声入力を利用できません"); return; }
+  if (!window.isSecureContext) {
+    showToast("音声入力にはHTTPS接続が必要です");
+    return;
+  }
+  if (state.cookVoiceEnabled) return;
+
+  if (navigator.mediaDevices?.getUserMedia) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+    } catch (error) {
+      const code = error?.name === "NotAllowedError" ? "not-allowed" : "audio-capture";
+      showToast(recognitionErrorMessage(code));
+      return;
+    }
+  }
+  state.cookVoiceEnabled = true;
+  state.cookVoicePaused = false;
+  updateCookVoiceButton();
+  startCookRecognitionSession();
+  showToast("音声操作をONにしました");
+}
+
+function disableCookVoice(notify = true) {
+  state.cookVoiceEnabled = false;
+  state.cookVoicePaused = false;
+  clearTimeout(state.cookVoiceRestartTimer);
+  state.cookRecognition?.abort();
+  state.cookRecognition = null;
+  $("#cookVoice").classList.remove("listening");
+  updateCookVoiceButton();
+  if (notify) showToast("音声操作をOFFにしました");
+}
+
+function toggleCookVoice() {
+  if (state.cookVoiceEnabled) disableCookVoice();
+  else enableCookVoice();
+}
+
 function speak(text) {
   if (!("speechSynthesis" in window)) { showToast("読み上げに対応していません"); return; }
+  if (state.cookVoiceEnabled) {
+    state.cookVoicePaused = true;
+    clearTimeout(state.cookVoiceRestartTimer);
+    state.cookRecognition?.abort();
+  }
   speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = "ja-JP";
   utterance.rate = 0.92;
+  const resumeCookVoice = () => {
+    state.cookVoicePaused = false;
+    scheduleCookRecognition(500);
+  };
+  utterance.onend = resumeCookVoice;
+  utterance.onerror = resumeCookVoice;
   speechSynthesis.speak(utterance);
 }
 
@@ -310,6 +419,7 @@ async function startCooking() {
     state.step = 0;
     $("#cookMode").classList.remove("hidden");
     document.body.style.overflow = "hidden";
+    enableCookVoice();
     await sendCookingAction("start");
   } catch (error) { showToast(error.message); }
 }
@@ -428,7 +538,7 @@ document.addEventListener("click", (event) => {
     "close-editor": () => $("#editorDialog").close(),
     "edit-current": () => openEditor(state.selected.read_only ? { ...state.selected, id: "" } : state.selected),
     "start-cooking": startCooking,
-    "stop-cooking": () => { $("#cookMode").classList.add("hidden"); document.body.style.overflow = ""; window.speechSynthesis?.cancel(); },
+    "stop-cooking": () => { disableCookVoice(false); $("#cookMode").classList.add("hidden"); document.body.style.overflow = ""; window.speechSynthesis?.cancel(); },
     "timer-stop": () => stopTimer(),
   };
   actions[target.dataset.action]?.();
@@ -437,7 +547,7 @@ document.addEventListener("click", (event) => {
 $("#searchForm").addEventListener("submit", (event) => { event.preventDefault(); loadRecipes($("#searchInput").value); });
 $("#searchInput").addEventListener("input", (event) => { clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadRecipes(event.target.value), 250); });
 $("#voiceSearch").addEventListener("click", () => setupRecognition($("#voiceSearch"), (text) => { $("#searchInput").value = text; loadRecipes(text); }));
-$("#cookVoice").addEventListener("click", () => setupRecognition($("#cookVoice"), handleCookCommand));
+$("#cookVoice").addEventListener("click", toggleCookVoice);
 $("#cookCommandForm").addEventListener("submit", (event) => {
   event.preventDefault();
   const input = $("#cookCommandInput");
