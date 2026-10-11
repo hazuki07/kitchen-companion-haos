@@ -51,6 +51,10 @@ Stage VMにはHome AssistantもMealieもありません。既定の`COOKING_ASSI
 Mealieカタログをローカルのモックで置き換え、画面上にも「Stage（HA・Mealieモック）」と表示されます。このモードは実HA・Mealieへ
 接続も書き込みもしません。
 
+HA OS上で試作する場合はApp設定を`mode: prototype`にし、`timer_script_entity_id`へ専用の
+Alexaタイマースクリプトを設定できます。このモードはレシピと工程案内をモックのまま維持し、タイマーボタンだけが
+指定したHome Assistant scriptを呼びます。Mealieやその他のHome Assistant entityへは接続しません。
+
 ## 実環境の接続設定（まだ切り替えない）
 
 Home Assistant Appとして動かす場合、HA認証は公式のSupervisorプロキシと自動提供される

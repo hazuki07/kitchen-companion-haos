@@ -128,6 +128,30 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(status["mealie"], "mock_read_only")
         self.assertFalse(status["external_write_enabled"])
 
+    def test_prototype_runtime_enables_only_home_assistant_timer(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "COOKING_ASSISTANT_MODE": "prototype",
+                "COOKING_ASSISTANT_TIMER_SCRIPT_ENTITY_ID": "script.fictional_alexa_timer",
+            },
+            clear=True,
+        ):
+            runtime = RuntimeConfig.from_environment()
+        status = runtime.public_status()
+        self.assertEqual(status["home_assistant"], "timer_script_action")
+        self.assertEqual(status["mealie"], "mock_read_only")
+        self.assertEqual(status["external_write_scope"], "timer_only")
+
+    def test_prototype_runtime_requires_scoped_timer_script(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"COOKING_ASSISTANT_MODE": "prototype"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "script entity ID"):
+                RuntimeConfig.from_environment()
+
     def test_stage_cooking_action_is_simulated(self) -> None:
         recipe = {"id": "fictional", "steps": ["切る。", "架空の鍋で煮る。"]}
         result = StageCookingController().perform(recipe, "next", 1, speak=True)

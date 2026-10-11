@@ -1,20 +1,31 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Any
 
 
 @dataclass(frozen=True)
 class RuntimeConfig:
     mode: str
+    timer_script_entity_id: str = field(default="", repr=False)
 
     @classmethod
     def from_environment(cls) -> RuntimeConfig:
         mode = os.environ.get("COOKING_ASSISTANT_MODE", "stage").strip().lower()
-        if mode not in {"stage", "home_assistant"}:
-            raise ValueError("COOKING_ASSISTANT_MODEはstageまたはhome_assistantを指定してください")
-        return cls(mode=mode)
+        if mode not in {"stage", "prototype", "home_assistant"}:
+            raise ValueError(
+                "COOKING_ASSISTANT_MODEはstage、prototype、home_assistantのいずれかを指定してください"
+            )
+        timer_script_entity_id = os.environ.get(
+            "COOKING_ASSISTANT_TIMER_SCRIPT_ENTITY_ID", ""
+        ).strip()
+        if mode == "prototype" and not re.fullmatch(
+            r"script\.[a-z0-9_]+", timer_script_entity_id
+        ):
+            raise ValueError("prototypeではAlexaタイマー用script entity IDが必要です")
+        return cls(mode=mode, timer_script_entity_id=timer_script_entity_id)
 
     def public_status(self) -> dict[str, Any]:
         if self.mode == "stage":
@@ -25,6 +36,16 @@ class RuntimeConfig:
                 "mealie": "mock_read_only",
                 "speech": "browser",
                 "external_write_enabled": False,
+            }
+        if self.mode == "prototype":
+            return {
+                "mode": self.mode,
+                "label": "試作（HA Alexaタイマー／レシピ・工程モック）",
+                "home_assistant": "timer_script_action",
+                "mealie": "mock_read_only",
+                "speech": "browser",
+                "external_write_enabled": True,
+                "external_write_scope": "timer_only",
             }
         return {
             "mode": self.mode,

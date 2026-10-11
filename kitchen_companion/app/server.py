@@ -752,10 +752,19 @@ class AppHandler(BaseHTTPRequestHandler):
 def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
     runtime = RuntimeConfig.from_environment()
     store = RecipeStore(db_path)
-    if runtime.mode == "stage":
+    if runtime.mode in {"stage", "prototype"}:
         recipe_reader: RecipeReader = MockMealieCatalog(MOCK_MEALIE_FIXTURE)
         cooking: StageCookingController | HomeAssistantCookingClient = StageCookingController()
-        timer: StageTimerController | HomeAssistantTimerClient = StageTimerController()
+        if runtime.mode == "prototype":
+            timer: StageTimerController | HomeAssistantTimerClient = HomeAssistantTimerClient(
+                UrllibJsonTransport(
+                    "http://supervisor/core",
+                    os.environ.get("SUPERVISOR_TOKEN", ""),
+                ),
+                runtime.timer_script_entity_id,
+            )
+        else:
+            timer = StageTimerController()
         images = None
     else:
         config_path = Path(os.environ.get("COOKING_ASSISTANT_EXTERNAL_CONFIG", "/config/integrations.json"))

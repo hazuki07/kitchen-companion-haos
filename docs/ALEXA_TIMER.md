@@ -3,6 +3,15 @@
 Kitchen CompanionはAlexaのentityや通知serviceを直接呼びません。実Home Assistantモードでは、
 Git管理外の`integrations.json`に設定した`timer_script_entity_id`だけを呼び出します。
 
+試作ではApp設定を次のようにすると、Mealieと工程案内をモックのまま維持してタイマーだけを接続できます。
+
+```yaml
+mode: prototype
+timer_script_entity_id: script.replace_with_kitchen_timer
+```
+
+App設定には実環境で作成した専用scriptのentity IDを入力し、リポジトリには記録しません。
+
 ```json
 {
   "home_assistant": {
