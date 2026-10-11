@@ -29,6 +29,7 @@ from app.server import (  # noqa: E402
     JsonLdParser,
     RecipeStore,
     assert_public_host,
+    extract_video_url,
     find_recipe_node,
     flatten_steps,
     parse_ingredient,
@@ -122,6 +123,12 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(node["name"], "架空の煮込み")
         self.assertEqual(flatten_steps(node["recipeInstructions"]), ["煮る。"])
 
+    def test_json_ld_video_url_is_extracted(self) -> None:
+        self.assertEqual(
+            extract_video_url({"@type": "VideoObject", "contentUrl": "https://video.example.invalid/watch/1"}),
+            "https://video.example.invalid/watch/1",
+        )
+
     def test_stage_runtime_never_claims_real_integrations(self) -> None:
         status = RuntimeConfig(mode="stage").public_status()
         self.assertEqual(status["home_assistant"], "mock")
@@ -197,12 +204,14 @@ class RecipeTests(unittest.TestCase):
                     "recipeIngredient": [{"display": "架空の香辛料 適量"}],
                     "recipeInstructions": [{"text": "架空の鍋で煮る。"}],
                     "tags": [{"name": "架空"}],
+                    "extras": {"video_url": "https://video.example.invalid/watch/1"},
                 },
             ]
         )
         recipes = MealieReadClient(transport).list("スープ")
         self.assertEqual(recipes[0]["title"], "架空スープ")
         self.assertFalse(recipes[0]["servings_confirmed"])
+        self.assertEqual(recipes[0]["video_url"], "https://video.example.invalid/watch/1")
         self.assertEqual(recipes[0]["ingredients"][0]["note"], "架空の香辛料 適量")
         self.assertEqual(
             recipes[0]["image_url"],

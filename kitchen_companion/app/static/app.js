@@ -13,6 +13,8 @@ const state = {
   cookVoiceRestartTimer: null,
   editorImage: "",
   runtime: null,
+  activeMode: "assist",
+  sourceFilter: "all",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -106,29 +108,61 @@ async function loadRuntime() {
 
 function renderGrid() {
   const grid = $("#recipeGrid");
-  if (!state.recipes.length) {
+  const recipes = state.recipes.filter((recipe) => {
+    if (state.sourceFilter === "mealie") return ["mealie", "mealie_mock"].includes(recipe.source_kind);
+    if (state.sourceFilter === "url") return Boolean(recipe.source_url || recipe.video_url);
+    return true;
+  });
+  if (!recipes.length) {
     grid.innerHTML = '<div class="empty-state"><strong>該当するレシピはありません</strong><p>別の材料で探すか、新しいレシピを登録してください。</p></div>';
     return;
   }
-  grid.innerHTML = state.recipes.map((recipe) => {
+  grid.innerHTML = recipes.map((recipe) => {
     const image = safeUrl(recipe.image_url);
     const media = image ? `<img src="${escapeHtml(image)}" alt="" loading="lazy">` : '<div class="placeholder">♨</div>';
     const servingLabel = recipe.servings_confirmed === false ? "人数未確認" : `${formatServings(recipe.servings)}人分`;
+    const sourceLabel = ["mealie", "mealie_mock"].includes(recipe.source_kind)
+      ? (recipe.source_kind === "mealie_mock" ? "Mealieモック" : "Mealie")
+      : recipe.video_url ? "動画URL" : recipe.source_url ? "Web URL" : "手入力";
     return `<article class="recipe-card">
       <div class="recipe-card-image">${media}<span>${servingLabel} · ${recipe.steps.length}工程</span></div>
       <div class="recipe-card-body"><h3>${escapeHtml(recipe.title)}</h3><p>${escapeHtml(recipe.description || "自分のレシピノート")}</p>
-      <div class="tags"><span class="tag">${recipe.source_kind === "mealie_mock" ? "Mealieモック" : "下書き"}</span>${recipe.tags.slice(0, 2).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
+      <div class="tags"><span class="tag">${sourceLabel}</span>${recipe.tags.slice(0, 2).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
       <button class="card-button" data-open="${recipe.id}">レシピを見る</button></div></article>`;
   }).join("");
 }
 
 function openDetail(recipe) {
+  setMode("assist", false);
   state.selected = recipe;
   state.servings = recipe.servings;
   renderDetail();
   $("#homeView").classList.add("hidden");
   $("#detailView").classList.remove("hidden");
   window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function setSourceFilter(source) {
+  state.sourceFilter = ["all", "mealie", "url"].includes(source) ? source : "all";
+  $$('[data-source]').forEach((button) => {
+    const active = button.dataset.source === state.sourceFilter;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  renderGrid();
+}
+
+function setMode(mode, focus = true) {
+  state.activeMode = mode === "import" ? "import" : "assist";
+  const importing = state.activeMode === "import";
+  $("#assistView").classList.toggle("hidden", importing);
+  $("#importView").classList.toggle("hidden", !importing);
+  $$('[data-mode]').forEach((button) => {
+    const active = button.dataset.mode === state.activeMode;
+    button.classList.toggle("active", active);
+    if (button.closest(".mode-switcher")) button.setAttribute("aria-pressed", String(active));
+  });
+  if (focus) window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 function renderDetail() {
@@ -156,6 +190,7 @@ function renderDetail() {
 function goHome() {
   $("#detailView").classList.add("hidden");
   $("#homeView").classList.remove("hidden");
+  setMode("assist");
 }
 
 function parseIngredientLine(line) {
@@ -170,7 +205,7 @@ function parseIngredientLine(line) {
 function openEditor(recipe = null, videoOnly = false) {
   state.editorImage = recipe?.image_url || "";
   $("#recipeId").value = recipe?.id || "";
-  $("#editorTitle").textContent = recipe ? "レシピを編集" : videoOnly ? "動画レシピを登録" : "レシピを登録";
+  $("#editorTitle").textContent = videoOnly ? "動画レシピを登録" : recipe ? "レシピを編集" : "レシピを登録";
   $("#titleField").value = recipe?.title || "";
   $("#servingsField").value = recipe?.servings || 2;
   $("#tagsField").value = recipe?.tags?.join(", ") || "";
@@ -217,7 +252,15 @@ async function importFromUrl(event) {
     openEditor(draft);
     showToast("内容を確認して保存してください");
   } catch (error) { showToast(error.message); }
-  finally { button.disabled = false; button.textContent = "URLから読み込む"; }
+  finally { button.disabled = false; button.textContent = "内容を読み込む"; }
+}
+
+function importFromVideo(event) {
+  event.preventDefault();
+  const value = $("#videoImportUrl").value.trim();
+  const videoUrl = safeUrl(value);
+  if (!videoUrl) { showToast("httpまたはhttpsの動画URLを入力してください"); return; }
+  openEditor({ video_url: videoUrl, source_url: videoUrl, servings: 2, tags: ["動画"] }, true);
 }
 
 function recognitionErrorMessage(code) {
@@ -532,6 +575,11 @@ document.addEventListener("click", (event) => {
   if (target.dataset.serving) { state.servings = adjustServings(state.servings, Number(target.dataset.serving)); renderDetail(); }
   if (target.dataset.step != null) { state.step = Number(target.dataset.step); renderCookStep(); }
   if (target.dataset.minutes) startTimer(Number(target.dataset.minutes));
+  if (target.dataset.mode) {
+    setMode(target.dataset.mode);
+    if (target.dataset.sourceTarget) setSourceFilter(target.dataset.sourceTarget);
+  }
+  if (target.dataset.source) setSourceFilter(target.dataset.source);
   const actions = {
     home: goHome,
     "open-editor": () => openEditor(null, target.dataset.kind === "video"),
@@ -558,6 +606,7 @@ $("#cookCommandForm").addEventListener("submit", (event) => {
 });
 $("#recipeForm").addEventListener("submit", saveRecipe);
 $("#importForm").addEventListener("submit", importFromUrl);
+$("#videoImportForm").addEventListener("submit", importFromVideo);
 $("#prevStep").addEventListener("click", () => changeStep(-1));
 $("#nextStep").addEventListener("click", () => changeStep(1));
 $("#speakStep").addEventListener("click", () => sendCookingAction("show", true).catch((error) => showToast(error.message)));

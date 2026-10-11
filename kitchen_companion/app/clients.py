@@ -189,6 +189,41 @@ def _instructions(raw: Any) -> list[str]:
     return result
 
 
+def _http_url(value: Any) -> str:
+    if isinstance(value, list):
+        for item in value:
+            if url := _http_url(item):
+                return url
+        return ""
+    if isinstance(value, dict):
+        for key in ("url", "contentUrl", "embedUrl", "value"):
+            if url := _http_url(value.get(key)):
+                return url
+        return ""
+    candidate = str(value or "").strip()
+    parsed = urlparse(candidate)
+    if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username:
+        return candidate[:2000]
+    return ""
+
+
+def _video_url(raw: dict[str, Any]) -> str:
+    for key in ("videoURL", "videoUrl", "video"):
+        if url := _http_url(raw.get(key)):
+            return url
+    extras = raw.get("extras") if isinstance(raw.get("extras"), dict) else {}
+    for key, value in extras.items():
+        normalized = str(key).casefold().replace("-", "_").replace(" ", "")
+        if normalized in {"video", "video_url", "videourl", "動画", "動画url", "youtube"}:
+            if url := _http_url(value):
+                return url
+    source_url = _http_url(raw.get("orgURL"))
+    hostname = (urlparse(source_url).hostname or "").casefold()
+    if hostname in {"youtu.be", "youtube.com", "www.youtube.com", "vimeo.com", "www.vimeo.com"}:
+        return source_url
+    return ""
+
+
 class MealieReadClient:
     def __init__(self, transport: JsonTransport):
         self.transport = transport
@@ -231,8 +266,8 @@ class MealieReadClient:
             "description": str(raw.get("description") or "")[:2000],
             "servings": servings or 1,
             "servings_confirmed": servings is not None and servings > 0,
-            "source_url": str(raw.get("orgURL") or "")[:2000],
-            "video_url": "",
+            "source_url": _http_url(raw.get("orgURL")),
+            "video_url": _video_url(raw),
             "image_url": image_url,
             "ingredients": ingredients,
             "steps": _instructions(raw.get("recipeInstructions")),

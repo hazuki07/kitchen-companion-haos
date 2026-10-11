@@ -388,6 +388,23 @@ def flatten_steps(value: Any) -> list[str]:
     return []
 
 
+def extract_video_url(value: Any) -> str:
+    if isinstance(value, list):
+        for item in value:
+            if url := extract_video_url(item):
+                return url
+        return ""
+    if isinstance(value, dict):
+        for key in ("contentUrl", "embedUrl", "url"):
+            if url := extract_video_url(value.get(key)):
+                return url
+        return ""
+    try:
+        return safe_http_url(value, allow_empty=True)
+    except ValueError:
+        return ""
+
+
 def assert_public_host(url: str) -> None:
     hostname = urlparse(url).hostname
     if not hostname:
@@ -463,6 +480,7 @@ def import_recipe(url: str) -> dict[str, Any]:
             "description": node.get("description", ""),
             "servings": servings,
             "source_url": url,
+            "video_url": extract_video_url(node.get("video")),
             "image_url": image,
             "ingredients": [parse_ingredient(item) for item in node.get("recipeIngredient", [])],
             "steps": flatten_steps(node.get("recipeInstructions", [])),

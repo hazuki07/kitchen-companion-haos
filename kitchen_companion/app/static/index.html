@@ -16,14 +16,19 @@
         <span class="brand-mark" aria-hidden="true">♨</span>
         <span><strong>Kitchen Companion</strong><small>きょうの料理を、いっしょに。</small></span>
       </button>
+      <nav class="mode-switcher" aria-label="利用モード">
+        <button class="active" data-mode="assist" aria-pressed="true">調理アシスト</button>
+        <button data-mode="import" aria-pressed="false">レシピ取り込み</button>
+      </nav>
       <div class="top-actions">
         <span class="status-chip" id="runtimeStatus"><span></span> 接続状態を確認中</span>
-        <button class="icon-button" data-action="open-editor" aria-label="レシピを登録">＋</button>
+        <button class="icon-button" data-mode="import" aria-label="レシピ取り込みを開く">＋</button>
       </div>
     </header>
 
     <main>
       <section class="home-view" id="homeView">
+        <div id="assistView">
         <div class="search-stage">
           <div>
             <p class="eyebrow">MY RECIPE LIBRARY</p>
@@ -43,24 +48,23 @@
         <div class="content-grid">
           <section>
             <div class="section-heading">
-              <div><p class="eyebrow">SAVED RECIPES</p><h2>登録したレシピ</h2></div>
-              <button class="text-button" data-action="open-editor">新しく登録</button>
+              <div><p class="eyebrow">CHOOSE A RECIPE</p><h2>レシピを選ぶ</h2></div>
+              <div class="source-filters" aria-label="レシピの出典">
+                <button class="active" data-source="all" aria-pressed="true">すべて</button>
+                <button data-source="mealie" aria-pressed="false">Mealie</button>
+                <button data-source="url" aria-pressed="false">URL・動画</button>
+              </div>
             </div>
             <div id="recipeGrid" class="recipe-grid" aria-live="polite"></div>
           </section>
 
           <aside class="side-panel">
-            <div class="import-card">
-              <span class="feature-icon" aria-hidden="true">↗</span>
-              <p class="eyebrow">FROM THE WEB</p>
-              <h2>お気に入りを持ち込む</h2>
-              <p>レシピサイトのURLから、材料と工程を下書きにします。保存前に内容を確認できます。</p>
-              <form id="importForm">
-                <label for="importUrl">レシピページのURL</label>
-                <input id="importUrl" type="url" placeholder="https://…" required>
-                <button class="primary-button" type="submit">URLから読み込む</button>
-              </form>
-              <button class="secondary-button" data-action="open-editor" data-kind="video">動画を登録する</button>
+            <div class="library-card">
+              <span class="feature-icon" aria-hidden="true">✓</span>
+              <p class="eyebrow">RECIPE SOURCES</p>
+              <h2>選べるレシピ</h2>
+              <p>Mealieの保存済みレシピと、URL・動画から取り込んだレシピをまとめて検索できます。</p>
+              <button class="primary-button" data-mode="import">レシピを取り込む</button>
             </div>
             <div class="tip-card">
               <strong>声で探せます</strong>
@@ -68,6 +72,44 @@
             </div>
           </aside>
         </div>
+        </div>
+
+        <section class="import-view hidden" id="importView">
+          <div class="import-heading">
+            <p class="eyebrow">RECIPE IMPORT</p>
+            <h1>レシピを取り込む</h1>
+            <p>レシピページまたは料理動画のURLを登録します。内容を確認してから保存できます。</p>
+          </div>
+          <div class="import-options">
+            <article class="import-option">
+              <span class="feature-icon" aria-hidden="true">↗</span>
+              <h2>レシピサイトから</h2>
+              <p>ページ内のレシピ情報から材料・人数・工程を読み込みます。</p>
+              <form id="importForm">
+                <label for="importUrl">レシピページのURL</label>
+                <input id="importUrl" type="url" placeholder="https://…" required>
+                <button class="primary-button" type="submit">内容を読み込む</button>
+              </form>
+            </article>
+            <article class="import-option">
+              <span class="feature-icon" aria-hidden="true">▶</span>
+              <h2>料理動画から</h2>
+              <p>動画URLを付けたレシピ下書きを作ります。材料と工程は確認しながら入力します。</p>
+              <form id="videoImportForm">
+                <label for="videoImportUrl">動画URL</label>
+                <input id="videoImportUrl" type="url" placeholder="https://youtube.com/…" required>
+                <button class="primary-button" type="submit">動画URLを付けて作成</button>
+              </form>
+            </article>
+            <article class="import-option mealie-option">
+              <span class="feature-icon" aria-hidden="true">M</span>
+              <h2>Mealieのレシピ</h2>
+              <p>Mealieのレシピは自動的に調理アシストへ反映されます。動画URLが登録されている場合はレシピ詳細にも表示します。</p>
+              <button class="secondary-button" data-mode="assist" data-source-target="mealie">Mealieから選ぶ</button>
+            </article>
+          </div>
+          <button class="secondary-button manual-recipe" data-action="open-editor">手入力でレシピを作成</button>
+        </section>
       </section>
 
       <section class="detail-view hidden" id="detailView" aria-live="polite"></section>
