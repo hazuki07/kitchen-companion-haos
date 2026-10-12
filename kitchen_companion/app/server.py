@@ -464,12 +464,25 @@ def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
                     amount = None
             else:
                 amount = None
+            amount_text = str(item.get("amount_text", "")).strip()[:50]
+            if amount is not None and not amount_text:
+                amount_text = f"{amount:g}"
+            unit = str(item.get("unit", ""))[:30]
+            name = str(item["name"]).strip()[:200]
+            note = str(item.get("note", ""))[:200]
+            original_text = str(item.get("original_text", "")).strip()[:500]
+            if not original_text:
+                original_text = " ".join(
+                    part for part in (amount_text, unit, name, note) if part
+                )[:500]
             clean_ingredients.append(
                 {
                     "amount": amount,
-                    "unit": str(item.get("unit", ""))[:30],
-                    "name": str(item["name"]).strip()[:200],
-                    "note": str(item.get("note", ""))[:200],
+                    "amount_text": amount_text,
+                    "unit": unit,
+                    "name": name,
+                    "note": note,
+                    "original_text": original_text,
                 }
             )
     clean_steps: list[str] = []
@@ -524,7 +537,8 @@ def safe_image_url(value: Any) -> str:
 
 
 def parse_ingredient(text: str) -> dict[str, Any]:
-    text = str(text).strip().replace("½", "1/2").replace("¼", "1/4").replace("¾", "3/4")
+    original_text = str(text).strip()[:500]
+    text = original_text.replace("½", "1/2").replace("¼", "1/4").replace("¾", "3/4")
     number_pattern = r"(\d+(?:\.\d+)?|\d+\s*/\s*\d+)"
     unit_pattern = r"(大さじ|小さじ|カップ|ml|mL|l|L|g|kg|個|本|枚|片|株|袋|缶|束|合)"
     match = re.match(rf"^\s*{number_pattern}\s*{unit_pattern}?\s+(.+)$", text)
@@ -537,7 +551,14 @@ def parse_ingredient(text: str) -> dict[str, Any]:
         else:
             match = re.match(rf"^(.+?)\s+{number_pattern}\s*{unit_pattern}\s*$", text)
             if not match:
-                return {"amount": None, "unit": "", "name": text[:200], "note": ""}
+                return {
+                    "amount": None,
+                    "amount_text": "",
+                    "unit": "",
+                    "name": text[:200],
+                    "note": "",
+                    "original_text": original_text,
+                }
             name, number, unit = match.group(1), match.group(2), match.group(3)
     number = number.replace(" ", "")
     if "/" in number:
@@ -545,7 +566,14 @@ def parse_ingredient(text: str) -> dict[str, Any]:
         amount = float(numerator) / float(denominator)
     else:
         amount = float(number)
-    return {"amount": amount, "unit": unit, "name": name[:200], "note": ""}
+    return {
+        "amount": amount,
+        "amount_text": number[:50],
+        "unit": unit,
+        "name": name[:200],
+        "note": "",
+        "original_text": original_text,
+    }
 
 
 class JsonLdParser(HTMLParser):
