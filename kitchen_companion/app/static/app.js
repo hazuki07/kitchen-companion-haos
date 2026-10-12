@@ -20,6 +20,7 @@ const state = {
   runtime: null,
   activeMode: "assist",
   sourceFilter: "all",
+  catalogStatus: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -103,12 +104,37 @@ function scaledIngredient(item, base, target, canScale = true) {
 async function loadRecipes(query = "") {
   const result = await api(`/api/catalog/recipes?q=${encodeURIComponent(query)}`);
   state.recipes = result.recipes;
+  state.catalogStatus = result;
   renderGrid();
+  renderCatalogStatus();
 }
 
 async function loadRuntime() {
   state.runtime = await api("/api/runtime");
   $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label)}`;
+  renderCatalogStatus();
+}
+
+function renderCatalogStatus() {
+  const element = $("#catalogStatus");
+  if (!element) return;
+  element.className = "catalog-status";
+  if (!state.runtime || !state.catalogStatus) {
+    element.textContent = "Mealieの接続状態を確認中です";
+    return;
+  }
+  if (state.catalogStatus.mealie_status === "error") {
+    element.classList.add("error");
+    element.innerHTML = `<span>${escapeHtml(state.catalogStatus.mealie_message)}</span><button data-action="refresh-recipes">再読み込み</button>`;
+    return;
+  }
+  if (state.catalogStatus.mealie_status === "mock") {
+    element.classList.add("warning");
+    element.innerHTML = '<span>現在はMealieモックです。実レシピを表示するにはApp設定を <strong>home_assistant</strong> に変更して再起動してください。</span><button data-action="refresh-recipes">再読み込み</button>';
+    return;
+  }
+  const count = Number(state.catalogStatus.mealie_count || 0);
+  element.innerHTML = `<span>Mealie接続中：${count}件を取得しました</span><button data-action="refresh-recipes">更新</button>`;
 }
 
 function renderGrid() {
@@ -184,19 +210,40 @@ function renderDetail() {
         ? '<button class="secondary-button" disabled>Mealieで確認</button>'
         : '<button class="secondary-button" data-action="sync-mealie">Mealieへ同期</button>'
     : "";
+  const deleteControl = recipe.read_only
+    ? '<p class="delete-guidance">このレシピを削除する場合はMealie側で削除し、一覧の「更新」を押してください。</p>'
+    : '<button class="danger-button" data-action="delete-current">ローカル下書きを削除</button>';
   $("#detailView").innerHTML = `
     <button class="back-button" data-action="home">← レシピ一覧</button>
     <div class="detail-hero">
       <div class="detail-image">${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(recipe.title)}">` : ""}</div>
       <div class="detail-copy"><p class="eyebrow">READY TO COOK</p><h1>${escapeHtml(recipe.title)}</h1><p>${escapeHtml(recipe.description)}</p>
         <div class="serving-control">${servingsConfirmed ? `<button data-serving="-1" aria-label="人数を減らす">−</button><strong>${formatServings(state.servings)}人分</strong><button data-serving="1" aria-label="人数を増やす">＋</button>` : "<strong>人数・換算は未確認</strong>"}</div>
-        <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button><button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button>${syncButton}</div>
+        <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button><button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button>${syncButton}${deleteControl}</div>
       </div>
     </div>
     <div class="recipe-columns"><section><p class="eyebrow">INGREDIENTS</p><h2>材料</h2><ul class="ingredient-list">
       ${recipe.ingredients.map((item) => `<li><span>${escapeHtml(item.name)}${item.note ? `<small> ${escapeHtml(item.note)}</small>` : ""}</span><strong>${escapeHtml(scaledIngredient(item, recipe.servings, state.servings, servingsConfirmed))}</strong></li>`).join("")}
       </ul>${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">出典ページを開く</a>` : ""}${video ? `<br><a class="source-link" href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">動画を開く</a>` : ""}</section>
       <section><p class="eyebrow">DIRECTIONS</p><h2>作り方</h2><ol class="steps-list">${recipe.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section></div>`;
+}
+
+async function deleteCurrentRecipe() {
+  const recipe = state.selected;
+  if (!recipe || recipe.read_only) return;
+  const message = recipe.mealie_sync_status === "synced"
+    ? "ローカル下書きだけを削除します。Mealieのレシピは削除されません。続けますか？"
+    : `「${recipe.title}」のローカル下書きを削除しますか？`;
+  if (!window.confirm(message)) return;
+  try {
+    await api(`/api/recipes/${recipe.id}`, { method: "DELETE" });
+    state.selected = null;
+    await loadRecipes();
+    goHome();
+    showToast("ローカル下書きを削除しました");
+  } catch (error) {
+    showToast(error.message);
+  }
 }
 
 async function syncCurrentRecipe(button) {
@@ -677,6 +724,8 @@ document.addEventListener("click", (event) => {
     "close-editor": () => $("#editorDialog").close(),
     "edit-current": () => openEditor(state.selected.read_only ? { ...state.selected, id: "" } : state.selected),
     "sync-mealie": () => syncCurrentRecipe(target),
+    "delete-current": deleteCurrentRecipe,
+    "refresh-recipes": () => loadRecipes($("#searchInput").value).catch((error) => showToast(error.message)),
     "start-cooking": startCooking,
     "stop-cooking": () => { disableCookVoice(false); $("#cookMode").classList.add("hidden"); document.body.style.overflow = ""; window.speechSynthesis?.cancel(); },
     "timer-stop": () => stopTimer(),

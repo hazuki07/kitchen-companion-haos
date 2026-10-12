@@ -790,7 +790,29 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/catalog/recipes":
             query = parse_qs(parsed.query).get("q", [""])[0][:160]
-            self.json_response({"recipes": self.catalog.list(query)})
+            try:
+                recipes = self.catalog.list(query)
+            except IntegrationError:
+                self.json_response(
+                    {
+                        "recipes": self.store.list(query),
+                        "mealie_status": "error",
+                        "mealie_count": 0,
+                        "mealie_message": (
+                            "Mealieへ接続できません。App設定のmode、Mealie URL、tokenを確認してください。"
+                        ),
+                    }
+                )
+                return
+            self.json_response(
+                {
+                    "recipes": recipes,
+                    "mealie_status": "connected" if self.runtime.mode == "home_assistant" else "mock",
+                    "mealie_count": sum(
+                        recipe.get("source_kind") == "mealie" for recipe in recipes
+                    ),
+                }
+            )
             return
         image_match = re.fullmatch(r"/api/catalog/images/([a-fA-F0-9-]{8,64})", parsed.path)
         if image_match:

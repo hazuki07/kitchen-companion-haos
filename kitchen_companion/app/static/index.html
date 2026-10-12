@@ -38,7 +38,7 @@
             <label class="sr-only" for="searchInput">レシピを検索</label>
             <span aria-hidden="true">⌕</span>
             <input id="searchInput" type="search" placeholder="料理名・材料・国・料理人で検索" autocomplete="off">
-            <button type="button" class="voice-button" id="voiceSearch" aria-label="音声で検索">●<span>話す</span></button>
+            <button type="button" class="voice-button" id="voiceSearch" aria-label="音声で検索"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4Z"></path><path d="M19 11a7 7 0 0 1-14 0M12 18v4M8 22h8"></path></svg></button>
           </form>
           <div class="quick-search" aria-label="検索例">
             <button data-query="鶏肉">鶏肉</button><button data-query="かんたん">20分以内</button><button data-query="野菜">野菜たっぷり</button>
@@ -55,6 +55,7 @@
                 <button data-source="url" aria-pressed="false">URL・動画</button>
               </div>
             </div>
+            <div class="catalog-status" id="catalogStatus" role="status">Mealieの接続状態を確認中です</div>
             <div id="recipeGrid" class="recipe-grid" aria-live="polite"></div>
           </section>
 

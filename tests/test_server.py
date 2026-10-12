@@ -208,6 +208,11 @@ class RecipeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "script entity ID"):
                 RuntimeConfig.from_environment()
 
+    def test_home_assistant_runtime_reports_real_mealie_connection(self) -> None:
+        status = RuntimeConfig(mode="home_assistant").public_status()
+        self.assertEqual(status["mealie"], "manual_sync")
+        self.assertTrue(status["mealie_sync_enabled"])
+
     def test_stage_cooking_action_is_simulated(self) -> None:
         recipe = {"id": "fictional", "steps": ["切る。", "架空の鍋で煮る。"]}
         result = StageCookingController().perform(recipe, "next", 1, speak=True)
@@ -321,6 +326,24 @@ class RecipeTests(unittest.TestCase):
             state, slug, _ = store.begin_mealie_sync(recipe_id, "fingerprint")
             self.assertEqual(state, "outcome_unknown")
             self.assertEqual(slug, "fictional-soup")
+
+    def test_deleting_local_recipe_also_removes_its_sync_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            recipe = store.list()[0]
+            store.begin_mealie_sync(recipe["id"], "fingerprint")
+            store.set_mealie_slug(recipe["id"], "fictional-soup")
+            store.finish_mealie_sync(
+                recipe["id"],
+                {"status": "synced", "mealie_slug": "fictional-soup"},
+            )
+            self.assertTrue(store.delete(recipe["id"]))
+            with store.connect() as db:
+                count = db.execute(
+                    "SELECT COUNT(*) FROM mealie_sync_records WHERE local_recipe_id = ?",
+                    (recipe["id"],),
+                ).fetchone()[0]
+            self.assertEqual(count, 0)
 
     def test_home_assistant_client_calls_only_configured_script(self) -> None:
         transport = RecordingTransport([[]])
