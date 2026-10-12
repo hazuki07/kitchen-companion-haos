@@ -11,6 +11,11 @@ const state = {
   cookVoiceEnabled: false,
   cookVoicePaused: false,
   cookVoiceRestartTimer: null,
+  cookVoiceWatchdogTimer: null,
+  cookVoiceSpeechResumeTimer: null,
+  cookVoiceRetryCount: 0,
+  cookVoiceStarting: false,
+  cookVoiceLastNetworkNotice: 0,
   editorImage: "",
   runtime: null,
   activeMode: "assist",
@@ -322,52 +327,76 @@ async function setupRecognition(button, onText) {
 function updateCookVoiceButton() {
   const button = $("#cookVoice");
   const enabled = state.cookVoiceEnabled;
+  const starting = state.cookVoiceStarting;
   button.classList.toggle("active", enabled);
+  button.classList.toggle("starting", starting);
   button.setAttribute("aria-pressed", String(enabled));
   button.setAttribute("aria-label", `音声操作を${enabled ? "OFF" : "ON"}にする`);
-  button.textContent = enabled ? "● 音声操作 ON" : "○ 音声操作 OFF";
+  button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4Z"></path><path d="M19 11a7 7 0 0 1-14 0M12 18v4M8 22h8"></path></svg><span>${starting ? "接続中" : enabled ? "音声 ON" : "音声 OFF"}</span>`;
 }
 
 function scheduleCookRecognition(delay = 250) {
   clearTimeout(state.cookVoiceRestartTimer);
-  if (!state.cookVoiceEnabled || state.cookVoicePaused || $("#cookMode").classList.contains("hidden")) return;
+  if (!state.cookVoiceEnabled || state.cookVoicePaused || state.cookRecognition
+    || document.visibilityState !== "visible" || $("#cookMode").classList.contains("hidden")) return;
   state.cookVoiceRestartTimer = setTimeout(startCookRecognitionSession, delay);
 }
 
 function startCookRecognitionSession() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition || !state.cookVoiceEnabled || state.cookVoicePaused) return;
+  if (!SpeechRecognition || !state.cookVoiceEnabled || state.cookVoicePaused || state.cookRecognition
+    || document.visibilityState !== "visible") return;
 
   const recognition = new SpeechRecognition();
+  const startedAt = Date.now();
   recognition.lang = "ja-JP";
   recognition.continuous = true;
   recognition.interimResults = false;
-  recognition.onstart = () => $("#cookVoice").classList.add("listening");
+  recognition.onstart = () => {
+    $("#cookVoice").classList.add("listening");
+    clearTimeout(state.cookVoiceWatchdogTimer);
+    state.cookVoiceWatchdogTimer = setTimeout(() => {
+      if (state.cookRecognition === recognition) recognition.abort();
+    }, 45_000);
+  };
   recognition.onresult = (event) => {
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
       if (event.results[index].isFinal) handleCookCommand(event.results[index][0].transcript);
     }
   };
   recognition.onerror = (event) => {
-    if (["not-allowed", "service-not-allowed", "audio-capture", "network"].includes(event.error)) {
+    if (["not-allowed", "service-not-allowed", "audio-capture"].includes(event.error)) {
       state.cookVoiceEnabled = false;
       showToast(recognitionErrorMessage(event.error));
       updateCookVoiceButton();
-    } else if (!['aborted', 'no-speech'].includes(event.error)) {
+    } else if (event.error === "network") {
+      if (Date.now() - state.cookVoiceLastNetworkNotice > 15_000) {
+        state.cookVoiceLastNetworkNotice = Date.now();
+        showToast("音声認識へ再接続します");
+      }
+      setTimeout(() => {
+        if (state.cookRecognition === recognition) recognition.abort();
+      }, 300);
+    } else if (!["aborted", "no-speech"].includes(event.error)) {
       showToast(recognitionErrorMessage(event.error));
     }
   };
   recognition.onend = () => {
+    clearTimeout(state.cookVoiceWatchdogTimer);
     if (state.cookRecognition === recognition) state.cookRecognition = null;
     $("#cookVoice").classList.remove("listening");
-    scheduleCookRecognition();
+    state.cookVoiceRetryCount = Date.now() - startedAt < 3_000
+      ? Math.min(state.cookVoiceRetryCount + 1, 4)
+      : 0;
+    scheduleCookRecognition(Math.min(4_000, 300 * (2 ** state.cookVoiceRetryCount)));
   };
   state.cookRecognition = recognition;
   try {
     recognition.start();
   } catch {
     state.cookRecognition = null;
-    scheduleCookRecognition(750);
+    state.cookVoiceRetryCount = Math.min(state.cookVoiceRetryCount + 1, 4);
+    scheduleCookRecognition(Math.min(4_000, 500 * (2 ** state.cookVoiceRetryCount)));
   }
 }
 
@@ -378,7 +407,9 @@ async function enableCookVoice() {
     showToast("音声入力にはHTTPS接続が必要です");
     return;
   }
-  if (state.cookVoiceEnabled) return;
+  if (state.cookVoiceEnabled || state.cookVoiceStarting) return;
+  state.cookVoiceStarting = true;
+  updateCookVoiceButton();
 
   if (navigator.mediaDevices?.getUserMedia) {
     try {
@@ -386,12 +417,22 @@ async function enableCookVoice() {
       stream.getTracks().forEach((track) => track.stop());
     } catch (error) {
       const code = error?.name === "NotAllowedError" ? "not-allowed" : "audio-capture";
+      state.cookVoiceStarting = false;
+      updateCookVoiceButton();
       showToast(recognitionErrorMessage(code));
       return;
     }
   }
+  if (!state.cookVoiceStarting) return;
+  if ($("#cookMode").classList.contains("hidden")) {
+    state.cookVoiceStarting = false;
+    updateCookVoiceButton();
+    return;
+  }
+  state.cookVoiceStarting = false;
   state.cookVoiceEnabled = true;
   state.cookVoicePaused = false;
+  state.cookVoiceRetryCount = 0;
   updateCookVoiceButton();
   startCookRecognitionSession();
   showToast("音声操作をONにしました");
@@ -400,7 +441,10 @@ async function enableCookVoice() {
 function disableCookVoice(notify = true) {
   state.cookVoiceEnabled = false;
   state.cookVoicePaused = false;
+  state.cookVoiceStarting = false;
   clearTimeout(state.cookVoiceRestartTimer);
+  clearTimeout(state.cookVoiceWatchdogTimer);
+  clearTimeout(state.cookVoiceSpeechResumeTimer);
   state.cookRecognition?.abort();
   state.cookRecognition = null;
   $("#cookVoice").classList.remove("listening");
@@ -409,7 +453,7 @@ function disableCookVoice(notify = true) {
 }
 
 function toggleCookVoice() {
-  if (state.cookVoiceEnabled) disableCookVoice();
+  if (state.cookVoiceEnabled || state.cookVoiceStarting) disableCookVoice();
   else enableCookVoice();
 }
 
@@ -418,6 +462,8 @@ function speak(text) {
   if (state.cookVoiceEnabled) {
     state.cookVoicePaused = true;
     clearTimeout(state.cookVoiceRestartTimer);
+    clearTimeout(state.cookVoiceWatchdogTimer);
+    clearTimeout(state.cookVoiceSpeechResumeTimer);
     state.cookRecognition?.abort();
   }
   speechSynthesis.cancel();
@@ -425,11 +471,19 @@ function speak(text) {
   utterance.lang = "ja-JP";
   utterance.rate = 0.92;
   const resumeCookVoice = () => {
+    clearTimeout(state.cookVoiceSpeechResumeTimer);
+    if (!state.cookVoiceEnabled) return;
     state.cookVoicePaused = false;
     scheduleCookRecognition(500);
   };
   utterance.onend = resumeCookVoice;
   utterance.onerror = resumeCookVoice;
+  if (state.cookVoiceEnabled) {
+    state.cookVoiceSpeechResumeTimer = setTimeout(
+      resumeCookVoice,
+      Math.max(8_000, Math.min(60_000, text.length * 350 + 3_000)),
+    );
+  }
   speechSynthesis.speak(utterance);
 }
 
@@ -501,6 +555,7 @@ async function changeStep(direction) {
 }
 
 function handleCookCommand(text) {
+  $("#cookCommandInput").value = text;
   showToast(`「${text}」`);
   if (/次|進んで/.test(text)) changeStep(1);
   else if (/戻|前/.test(text)) changeStep(-1);
@@ -606,13 +661,23 @@ $("#searchForm").addEventListener("submit", (event) => { event.preventDefault();
 $("#searchInput").addEventListener("input", (event) => { clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadRecipes(event.target.value), 250); });
 $("#voiceSearch").addEventListener("click", () => setupRecognition($("#voiceSearch"), (text) => { $("#searchInput").value = text; loadRecipes(text); }));
 $("#cookVoice").addEventListener("click", toggleCookVoice);
+document.addEventListener("visibilitychange", () => {
+  if (!state.cookVoiceEnabled) return;
+  if (document.visibilityState === "hidden") {
+    clearTimeout(state.cookVoiceRestartTimer);
+    clearTimeout(state.cookVoiceWatchdogTimer);
+    state.cookRecognition?.abort();
+  } else {
+    scheduleCookRecognition(200);
+  }
+});
+window.addEventListener("focus", () => scheduleCookRecognition(200));
 $("#cookCommandForm").addEventListener("submit", (event) => {
   event.preventDefault();
   const input = $("#cookCommandInput");
   const command = input.value.trim();
   if (!command) return;
   handleCookCommand(command);
-  input.value = "";
 });
 $("#recipeForm").addEventListener("submit", saveRecipe);
 $("#importForm").addEventListener("submit", importFromUrl);

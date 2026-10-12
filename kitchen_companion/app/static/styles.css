@@ -131,7 +131,10 @@ label small { color: var(--muted); font-weight: 400; }
 .cook-mode header div span, .cook-mode header div strong { display: block; }
 .cook-mode header div strong { margin-top: 4px; color: #9ca9bd; font-size: .78rem; }
 .cook-close, .cook-voice { padding: 11px; border: 1px solid rgba(255,255,255,.18); border-radius: 10px; background: rgba(255,255,255,.06); color: #fff; }
+.cook-voice { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.cook-voice svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .cook-voice.active { border-color: #58c49b; background: rgba(88,196,155,.18); color: #baf4de; }
+.cook-voice.starting { color: #ffc36f; }
 .cook-voice.listening { animation: pulse 1s infinite; box-shadow: 0 0 0 4px rgba(88,196,155,.14); }
 .cook-body { display: grid; grid-template-columns: 210px 1fr; min-height: 0; }
 .step-rail { overflow: auto; padding: 28px 20px; border-right: 1px solid rgba(255,255,255,.1); }
@@ -140,10 +143,11 @@ label small { color: var(--muted); font-weight: 400; }
 .current-step { align-self: center; width: min(850px, calc(100% - 60px)); margin: auto; }
 .step-number { display: grid; place-items: center; width: 56px; height: 56px; margin: 15px 0 23px; border-radius: 50%; background: var(--amber); color: var(--navy); font-size: 1.5rem; font-weight: 900; }
 .current-step > p:not(.eyebrow) { margin: 0; font-family: var(--font-sans); font-size: clamp(1.75rem, 4vw, 3.35rem); line-height: 1.55; }
-.cook-command { display: flex; gap: 9px; margin-top: 30px; }
+.cook-command { margin-top: 30px; }
 .cook-command input { min-width: 0; border-color: rgba(255,255,255,.2); background: rgba(255,255,255,.09); color: #fff; }
 .cook-command input::placeholder { color: #aeb8c8; }
-.cook-command button { padding: 10px 18px; border: 0; border-radius: 10px; background: var(--amber); color: var(--navy); font-weight: 800; }
+.command-hints { display: flex; gap: 7px; margin-top: 10px; flex-wrap: wrap; }
+.command-hints span { padding: 5px 9px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: #aeb8c8; font-size: .75rem; }
 .timer-panel { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-top: 18px; padding: 18px 20px; border: 1px solid rgba(255,255,255,.14); border-radius: 15px; background: rgba(255,255,255,.05); }
 .timer-panel span, .timer-panel strong { display: block; }
 .timer-panel span { color: #aeb8c8; font-size: .78rem; }
@@ -180,8 +184,10 @@ label small { color: var(--muted); font-weight: 400; }
   .recipe-grid, .form-grid { grid-template-columns: 1fr; }
   .form-grid .wide { grid-column: auto; }
   .cook-mode header { grid-template-columns: auto 1fr auto; padding: 12px; }
-  .cook-close, .cook-voice { font-size: 0; width: 46px; height: 44px; }
-  .cook-close::first-letter, .cook-voice::first-letter { font-size: 1rem; }
+  .cook-close, .cook-voice { width: 46px; height: 44px; }
+  .cook-close { font-size: 0; }
+  .cook-close::first-letter { font-size: 1rem; }
+  .cook-voice span { display: none; }
   .current-step { width: calc(100% - 35px); }
   .timer-panel { align-items: stretch; flex-direction: column; }
   .timer-presets { flex-wrap: wrap; }

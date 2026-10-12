@@ -142,7 +142,7 @@
     <header>
       <button class="cook-close" data-action="stop-cooking">× 終了</button>
       <div><span id="cookTitle"></span><strong id="stepCounter"></strong></div>
-      <button class="cook-voice" id="cookVoice" aria-pressed="false" aria-label="音声操作をONにする">○ 音声操作 OFF</button>
+      <button class="cook-voice" id="cookVoice" aria-pressed="false" aria-label="音声操作をONにする"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4Z"></path><path d="M19 11a7 7 0 0 1-14 0M12 18v4M8 22h8"></path></svg><span>音声 OFF</span></button>
     </header>
     <div class="cook-body">
       <div class="step-rail" id="stepRail"></div>
@@ -152,8 +152,8 @@
         <p id="stepText"></p>
         <form class="cook-command" id="cookCommandForm">
           <label class="sr-only" for="cookCommandInput">調理コマンド</label>
-          <input id="cookCommandInput" type="text" enterkeyhint="send" placeholder="次へ・戻って・読み上げ・5分タイマー">
-          <button type="submit">実行</button>
+          <input id="cookCommandInput" type="text" enterkeyhint="send" placeholder="認識したコマンドをここに表示します">
+          <div class="command-hints" aria-label="使用できる音声コマンド"><span>次へ</span><span>戻って</span><span>読み上げ</span><span>5分タイマー</span><span>停止</span></div>
         </form>
         <div class="timer-panel">
           <div><span>タイマー</span><strong id="timerDisplay">00:00</strong></div>
