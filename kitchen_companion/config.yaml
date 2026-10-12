@@ -1,5 +1,5 @@
 name: Kitchen Companion
-version: "0.1.10"
+version: "0.1.11"
 slug: kitchen_companion
 description: 音声と大きな画面で調理を案内する、タブレット向け料理アシスタント
 arch:
