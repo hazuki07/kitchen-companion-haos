@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .catalog import CombinedRecipeCatalog, MockMealieCatalog, RecipeReader
@@ -354,23 +354,60 @@ class JsonLdParser(HTMLParser):
             self.capture = False
 
 
-def find_recipe_node(value: Any) -> dict[str, Any] | None:
+class PageMetadataParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.metadata: dict[str, str] = {}
+        self.capture_title = False
+        self.title_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag.lower() == "title":
+            self.capture_title = True
+        if tag.lower() != "meta":
+            return
+        key = str(values.get("property") or values.get("name") or "").casefold()
+        content = str(values.get("content") or "").strip()
+        if key and content:
+            self.metadata.setdefault(key, content)
+
+    def handle_data(self, data: str) -> None:
+        if self.capture_title and data.strip():
+            self.title_parts.append(data.strip())
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title":
+            self.capture_title = False
+
+    @property
+    def title(self) -> str:
+        return " ".join(self.title_parts).strip()
+
+
+def find_typed_node(value: Any, node_type: str) -> dict[str, Any] | None:
     if isinstance(value, dict):
         kinds = value.get("@type", [])
         if isinstance(kinds, str):
             kinds = [kinds]
-        if "Recipe" in kinds:
+        elif not isinstance(kinds, list):
+            kinds = []
+        if node_type in kinds:
             return value
         for nested in value.values():
-            found = find_recipe_node(nested)
+            found = find_typed_node(nested, node_type)
             if found:
                 return found
     if isinstance(value, list):
         for nested in value:
-            found = find_recipe_node(nested)
+            found = find_typed_node(nested, node_type)
             if found:
                 return found
     return None
+
+
+def find_recipe_node(value: Any) -> dict[str, Any] | None:
+    return find_typed_node(value, "Recipe")
 
 
 def flatten_steps(value: Any) -> list[str]:
@@ -405,6 +442,42 @@ def extract_video_url(value: Any) -> str:
         return ""
 
 
+def extract_description_recipe(description: str) -> tuple[float, list[dict[str, Any]], list[str]]:
+    servings_match = re.search(r"(\d+(?:\.\d+)?)\s*人分", description)
+    servings = float(servings_match.group(1)) if servings_match else 2
+    ingredients: list[dict[str, Any]] = []
+    steps: list[str] = []
+    section = ""
+    ingredient_heading = re.compile(r"^(?:[#【\[（(\s]*)(?:材料|ingredients?)", re.IGNORECASE)
+    step_heading = re.compile(
+        r"^(?:[#【\[（(\s]*)(?:作り方|手順|調理手順|directions?|instructions?|method)",
+        re.IGNORECASE,
+    )
+    for raw_line in description.splitlines():
+        line = raw_line.strip()
+        if ingredient_heading.match(line):
+            section = "ingredients"
+            continue
+        if step_heading.match(line):
+            section = "steps"
+            continue
+        if not line or not section:
+            continue
+        if line.startswith(("http://", "https://")) or (line.startswith("#") and len(line) < 80):
+            section = ""
+            continue
+        cleaned = re.sub(r"^[\s・●◯○■□✓✔*-]+", "", line)
+        if section == "steps":
+            cleaned = re.sub(r"^\d+[.)．、:]\s*", "", cleaned)
+        if not cleaned:
+            continue
+        if section == "ingredients" and len(ingredients) < 200:
+            ingredients.append(parse_ingredient(cleaned))
+        elif section == "steps" and len(steps) < 100:
+            steps.append(cleaned[:2000])
+    return servings, ingredients, steps
+
+
 def assert_public_host(url: str) -> None:
     hostname = urlparse(url).hostname
     if not hostname:
@@ -434,7 +507,7 @@ class SafeRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def import_recipe(url: str) -> dict[str, Any]:
+def fetch_public_html(url: str, kind: str) -> tuple[str, str]:
     url = safe_http_url(url)
     assert_public_host(url)
     request = Request(url, headers={"User-Agent": "KitchenCompanion/0.1 (+personal recipe importer)"})
@@ -451,19 +524,23 @@ def import_recipe(url: str) -> dict[str, Any]:
             charset = response.headers.get_content_charset() or "utf-8"
             html = raw.decode(charset, errors="replace")
     except (HTTPError, URLError, TimeoutError) as exc:
-        raise ValueError("レシピサイトを取得できませんでした") from exc
+        raise ValueError(f"{kind}ページを取得できませんでした") from exc
+    return url, html
+
+
+def parse_json_ld_nodes(html: str) -> list[Any]:
     parser = JsonLdParser()
     parser.feed(html)
-    node = None
+    nodes = []
     for block in parser.blocks:
         try:
-            node = find_recipe_node(json.loads(block))
+            nodes.append(json.loads(block))
         except json.JSONDecodeError:
             continue
-        if node:
-            break
-    if not node:
-        raise ValueError("このページからレシピ情報を見つけられませんでした")
+    return nodes
+
+
+def recipe_draft_from_node(node: dict[str, Any], source_url: str, video_url: str = "") -> dict[str, Any]:
     image = node.get("image", "")
     if isinstance(image, list):
         image = image[0] if image else ""
@@ -479,14 +556,79 @@ def import_recipe(url: str) -> dict[str, Any]:
             "title": node.get("name", "取り込んだレシピ"),
             "description": node.get("description", ""),
             "servings": servings,
-            "source_url": url,
-            "video_url": extract_video_url(node.get("video")),
-            "image_url": image,
+            "source_url": source_url,
+            "video_url": video_url or extract_video_url(node.get("video")),
+            "image_url": urljoin(source_url, str(image)) if image else "",
             "ingredients": [parse_ingredient(item) for item in node.get("recipeIngredient", [])],
             "steps": flatten_steps(node.get("recipeInstructions", [])),
-            "tags": [],
+            "tags": ["動画"] if video_url else [],
         }
     )
+
+
+def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
+    structured = parse_json_ld_nodes(html)
+    recipe_node = next((node for value in structured if (node := find_recipe_node(value))), None)
+    if recipe_node:
+        return recipe_draft_from_node(recipe_node, url, url)
+
+    video_node = next(
+        (node for value in structured if (node := find_typed_node(value, "VideoObject"))),
+        None,
+    )
+    metadata = PageMetadataParser()
+    metadata.feed(html)
+    title = str((video_node or {}).get("name") or "").strip()
+    if not title:
+        title = metadata.metadata.get("og:title") or metadata.metadata.get("twitter:title") or metadata.title
+    description = str((video_node or {}).get("description") or "").strip()
+    if not description:
+        description = (
+            metadata.metadata.get("og:description")
+            or metadata.metadata.get("twitter:description")
+            or metadata.metadata.get("description")
+            or ""
+        )
+    image = (video_node or {}).get("thumbnailUrl", "")
+    if isinstance(image, list):
+        image = image[0] if image else ""
+    if not image:
+        image = metadata.metadata.get("og:image") or metadata.metadata.get("twitter:image") or ""
+    servings, ingredients, steps = extract_description_recipe(description)
+    try:
+        image_url = safe_image_url(urljoin(url, str(image or "")))
+    except ValueError:
+        image_url = ""
+    return validate_recipe(
+        {
+            "title": title or "動画レシピ",
+            "description": description,
+            "servings": servings,
+            "source_url": url,
+            "video_url": url,
+            "image_url": image_url,
+            "ingredients": ingredients,
+            "steps": steps,
+            "tags": ["動画"],
+        }
+    )
+
+
+def import_recipe(url: str) -> dict[str, Any]:
+    url, html = fetch_public_html(url, "レシピサイト")
+    node = None
+    for value in parse_json_ld_nodes(html):
+        node = find_recipe_node(value)
+        if node:
+            break
+    if not node:
+        raise ValueError("このページからレシピ情報を見つけられませんでした")
+    return recipe_draft_from_node(node, url)
+
+
+def import_video(url: str) -> dict[str, Any]:
+    url, html = fetch_public_html(url, "動画")
+    return video_draft_from_html(url, html)
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -597,6 +739,9 @@ class AppHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/import":
                 data = self.body()
                 self.json_response(import_recipe(str(data.get("url", ""))))
+            elif self.path == "/api/import/video":
+                data = self.body()
+                self.json_response(import_video(str(data.get("url", ""))))
             elif self.path == "/api/timer/action":
                 data = self.body()
                 request_id = str(data.get("request_id", ""))

@@ -255,12 +255,22 @@ async function importFromUrl(event) {
   finally { button.disabled = false; button.textContent = "内容を読み込む"; }
 }
 
-function importFromVideo(event) {
+async function importFromVideo(event) {
   event.preventDefault();
-  const value = $("#videoImportUrl").value.trim();
-  const videoUrl = safeUrl(value);
-  if (!videoUrl) { showToast("httpまたはhttpsの動画URLを入力してください"); return; }
-  openEditor({ video_url: videoUrl, source_url: videoUrl, servings: 2, tags: ["動画"] }, true);
+  const button = event.currentTarget.querySelector("button");
+  button.disabled = true;
+  button.textContent = "動画情報を取得中…";
+  try {
+    const draft = await api("/api/import/video", {
+      method: "POST",
+      body: JSON.stringify({ url: $("#videoImportUrl").value }),
+    });
+    openEditor(draft, true);
+    showToast(draft.ingredients.length || draft.steps.length
+      ? "動画ページのレシピ情報を自動入力しました"
+      : "動画情報を入力しました。材料と工程を確認してください");
+  } catch (error) { showToast(error.message); }
+  finally { button.disabled = false; button.textContent = "動画から自動入力"; }
 }
 
 function recognitionErrorMessage(code) {

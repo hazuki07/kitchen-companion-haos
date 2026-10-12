@@ -29,11 +29,13 @@ from app.server import (  # noqa: E402
     JsonLdParser,
     RecipeStore,
     assert_public_host,
+    extract_description_recipe,
     extract_video_url,
     find_recipe_node,
     flatten_steps,
     parse_ingredient,
     validate_recipe,
+    video_draft_from_html,
 )
 
 
@@ -128,6 +130,52 @@ class RecipeTests(unittest.TestCase):
             extract_video_url({"@type": "VideoObject", "contentUrl": "https://video.example.invalid/watch/1"}),
             "https://video.example.invalid/watch/1",
         )
+
+    def test_video_metadata_prefills_draft(self) -> None:
+        html = """
+        <html><head>
+          <meta property="og:title" content="架空の料理動画">
+          <meta property="og:description" content="架空の説明">
+          <meta property="og:image" content="https://images.example.invalid/thumb.jpg">
+        </head></html>
+        """
+        draft = video_draft_from_html("https://video.example.invalid/watch/1", html)
+        self.assertEqual(draft["title"], "架空の料理動画")
+        self.assertEqual(draft["description"], "架空の説明")
+        self.assertEqual(draft["video_url"], "https://video.example.invalid/watch/1")
+        self.assertEqual(draft["image_url"], "https://images.example.invalid/thumb.jpg")
+        self.assertEqual(draft["ingredients"], [])
+        self.assertEqual(draft["steps"], [])
+
+    def test_video_description_sections_prefill_recipe(self) -> None:
+        description = """架空の説明
+材料（3人分）
+・豆 150g
+・塩 適量
+作り方
+1. 豆を洗う。
+2. 架空の鍋で煮る。
+#架空料理
+"""
+        servings, ingredients, steps = extract_description_recipe(description)
+        self.assertEqual(servings, 3)
+        self.assertEqual(ingredients[0]["name"], "豆")
+        self.assertEqual(ingredients[0]["amount"], 150)
+        self.assertEqual(steps, ["豆を洗う。", "架空の鍋で煮る。"])
+
+    def test_video_recipe_json_ld_prefills_ingredients_and_steps(self) -> None:
+        payload = {
+            "@type": "Recipe",
+            "name": "架空の動画レシピ",
+            "recipeYield": "2人分",
+            "recipeIngredient": ["豆 100g"],
+            "recipeInstructions": [{"text": "架空の鍋で煮る。"}],
+        }
+        html = f'<script type="application/ld+json">{json.dumps(payload)}</script>'
+        draft = video_draft_from_html("https://video.example.invalid/watch/2", html)
+        self.assertEqual(draft["ingredients"][0]["name"], "豆")
+        self.assertEqual(draft["steps"], ["架空の鍋で煮る。"])
+        self.assertEqual(draft["tags"], ["動画"])
 
     def test_stage_runtime_never_claims_real_integrations(self) -> None:
         status = RuntimeConfig(mode="stage").public_status()
