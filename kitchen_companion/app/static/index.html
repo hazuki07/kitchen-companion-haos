@@ -154,20 +154,29 @@
     <div class="cook-body">
       <div class="step-rail" id="stepRail"></div>
       <article class="current-step">
-        <p class="eyebrow">CURRENT STEP</p>
-        <div class="step-number" id="stepNumber"></div>
-        <p id="stepText"></p>
-        <div class="cook-video hidden" id="cookVideo"></div>
-        <ul class="cook-preparation hidden" id="preparationList"></ul>
-        <form class="cook-command" id="cookCommandForm">
-          <label class="sr-only" for="cookCommandInput">調理コマンド</label>
-          <input id="cookCommandInput" type="text" enterkeyhint="send" placeholder="認識したコマンドをここに表示します">
-          <div class="command-hints" aria-label="使用できる音声コマンド"><span>できました</span><span>戻って</span><span>読み上げ</span><span>5分タイマー</span><span>停止</span></div>
-        </form>
-        <div class="timer-panel">
-          <div><span>タイマー</span><strong id="timerDisplay">00:00</strong></div>
-          <div class="timer-presets"><button data-minutes="3">3分</button><button data-minutes="5">5分</button><button data-minutes="10">10分</button><button data-action="timer-stop">停止</button></div>
-        </div>
+        <nav class="cook-tabs" aria-label="工程アシストの表示">
+          <button class="active" data-cook-tab="step" aria-pressed="true">工程</button>
+          <button data-cook-tab="video" id="cookVideoTab" aria-pressed="false">動画</button>
+        </nav>
+        <section class="cook-panel" id="cookStepPanel">
+          <p class="eyebrow">CURRENT STEP</p>
+          <div class="step-number" id="stepNumber"></div>
+          <p id="stepText"></p>
+          <ul class="cook-preparation hidden" id="preparationList"></ul>
+          <form class="cook-command" id="cookCommandForm">
+            <label class="sr-only" for="cookCommandInput">調理コマンド</label>
+            <input id="cookCommandInput" type="text" enterkeyhint="send" placeholder="認識したコマンドをここに表示します">
+            <div class="command-hints" aria-label="使用できる音声コマンド"><span>できました</span><span>戻って</span><span>読み上げ</span><span>5分タイマー</span><span>停止</span></div>
+          </form>
+          <div class="timer-panel">
+            <div><span>タイマー</span><strong id="timerDisplay">00:00</strong></div>
+            <div class="timer-presets"><button data-minutes="3">3分</button><button data-minutes="5">5分</button><button data-minutes="10">10分</button><button data-action="timer-stop">停止</button></div>
+          </div>
+        </section>
+        <section class="cook-panel hidden" id="cookVideoPanel">
+          <div class="cook-video" id="cookVideo"></div>
+          <p class="cook-video-empty hidden" id="cookVideoEmpty">このレシピには埋め込み可能な動画がありません。</p>
+        </section>
       </article>
     </div>
     <footer><button id="prevStep">戻る</button><button id="speakStep">読み上げる</button><button class="next-step" id="nextStep">次へ</button></footer>

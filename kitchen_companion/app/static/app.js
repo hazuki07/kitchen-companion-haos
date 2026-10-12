@@ -24,6 +24,7 @@ const state = {
   sourceFilter: "all",
   catalogStatus: null,
   quantityMode: "recipe",
+  cookTab: "step",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -817,6 +818,7 @@ async function startCooking() {
   if (!state.selected?.steps.length) { showToast("工程を登録してください"); return; }
   try {
     disableCookVoice(false);
+    state.cookTab = "step";
     state.step = hasPreparationStage() ? -1 : 0;
     $("#cookMode").classList.remove("hidden");
     document.body.style.overflow = "hidden";
@@ -838,7 +840,10 @@ function renderCookStep() {
   $("#stepText").textContent = preparing ? "材料を準備しましょう" : recipe.steps[state.step];
   const videoStart = preparing ? 0 : recipe.step_video_timestamps?.[state.step] || 0;
   const cookVideoUrl = videoEmbedUrl(recipe.video_url, videoStart);
+  $("#cookVideoTab").disabled = !cookVideoUrl;
+  if (!cookVideoUrl && state.cookTab === "video") state.cookTab = "step";
   $("#cookVideo").classList.toggle("hidden", !cookVideoUrl);
+  $("#cookVideoEmpty").classList.toggle("hidden", Boolean(cookVideoUrl));
   $("#cookVideo").innerHTML = cookVideoUrl
     ? `<div class="cook-video-frame"><iframe src="${escapeHtml(cookVideoUrl)}" title="${escapeHtml(recipe.title)} ${preparing ? "準備" : `工程${state.step + 1}`}の動画" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div>${videoStart ? `<small>${escapeHtml(formatVideoTimestamp(videoStart))}から表示</small>` : ""}`
     : "";
@@ -852,9 +857,23 @@ function renderCookStep() {
   $("#stepRail").innerHTML = preparationRail + recipe.steps.map((_, index) => `<button class="rail-step ${index === state.step ? "active" : ""}" data-step="${index}">工程 ${index + 1}</button>`).join("");
   $("#prevStep").disabled = preparing || (!hasPreparation && state.step === 0);
   $("#nextStep").textContent = preparing
-    ? "準備できました"
-    : state.step === recipe.steps.length - 1 ? "できあがり" : "できました";
+    ? "次へ"
+    : state.step === recipe.steps.length - 1 ? "できあがり" : "次へ";
+  setCookTab(state.cookTab);
   sessionStorage.setItem(`step:${recipe.id}`, state.step);
+}
+
+function setCookTab(tab) {
+  const videoAvailable = !$("#cookVideoTab").disabled;
+  state.cookTab = tab === "video" && videoAvailable ? "video" : "step";
+  const showingVideo = state.cookTab === "video";
+  $("#cookStepPanel").classList.toggle("hidden", showingVideo);
+  $("#cookVideoPanel").classList.toggle("hidden", !showingVideo);
+  $$('[data-cook-tab]').forEach((button) => {
+    const active = button.dataset.cookTab === state.cookTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
 }
 
 async function changeStep(direction) {
@@ -981,6 +1000,7 @@ document.addEventListener("click", (event) => {
     state.quantityMode = target.dataset.quantityMode;
     renderDetail();
   }
+  if (target.dataset.cookTab) setCookTab(target.dataset.cookTab);
   if (target.dataset.step != null) selectCookStage(Number(target.dataset.step));
   if (target.dataset.minutes) startTimer(Number(target.dataset.minutes));
   if (target.dataset.mode) {
