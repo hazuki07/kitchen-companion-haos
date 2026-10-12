@@ -35,6 +35,7 @@ from app.server import (  # noqa: E402
     find_recipe_node,
     flatten_steps,
     parse_ingredient,
+    parse_video_timestamp,
     validate_recipe,
     video_draft_from_html,
 )
@@ -79,6 +80,7 @@ class RecipeTests(unittest.TestCase):
                     "portion_kind": "mixed_meat",
                     "meat_g_per_person": 150,
                     "rice_go_per_person": 0.375,
+                    "step_video_timestamps": [15],
                     "ingredients": [{"amount": 200, "unit": "g", "name": "豆"}],
                     "steps": ["鍋で煮る。"],
                     "tags": ["架空", "スープ"],
@@ -87,6 +89,7 @@ class RecipeTests(unittest.TestCase):
             self.assertEqual(store.get(saved["id"])["title"], "架空の豆スープ")
             self.assertEqual(store.get(saved["id"])["portion_kind"], "mixed_meat")
             self.assertEqual(store.get(saved["id"])["rice_go_per_person"], 0.375)
+            self.assertEqual(store.get(saved["id"])["step_video_timestamps"], [15])
             self.assertEqual([item["id"] for item in store.list("豆")], [saved["id"]])
 
     def test_validation_rejects_bad_servings(self) -> None:
@@ -133,6 +136,11 @@ class RecipeTests(unittest.TestCase):
         parsed = parse_ingredient("1/2 個 玉ねぎ")
         self.assertEqual(parsed["amount"], 0.5)
         self.assertEqual(parsed["name"], "玉ねぎ")
+
+    def test_video_timestamp_accepts_clock_formats(self) -> None:
+        self.assertEqual(parse_video_timestamp("01:30"), 90)
+        self.assertEqual(parse_video_timestamp("1:02:03"), 3723)
+        self.assertIsNone(parse_video_timestamp(""))
 
     def test_japanese_ingredient_orders(self) -> None:
         self.assertEqual(parse_ingredient("鶏もも肉 300g")["amount"], 300)
@@ -195,15 +203,22 @@ class RecipeTests(unittest.TestCase):
 ・豆 150g
 ・塩 適量
 作り方
-1. 豆を洗う。
-2. 架空の鍋で煮る。
+00:15 豆を洗う。
+01:30 架空の鍋で煮る。
 #架空料理
 """
         servings, ingredients, steps = extract_description_recipe(description)
         self.assertEqual(servings, 3)
         self.assertEqual(ingredients[0]["name"], "豆")
         self.assertEqual(ingredients[0]["amount"], 150)
-        self.assertEqual(steps, ["豆を洗う。", "架空の鍋で煮る。"])
+        self.assertEqual(steps, ["00:15 豆を洗う。", "01:30 架空の鍋で煮る。"])
+
+        draft = video_draft_from_html(
+            "https://video.example.invalid/watch/timestamps",
+            f'<meta property="og:description" content="{description}">',
+        )
+        self.assertEqual(draft["steps"], ["豆を洗う。", "架空の鍋で煮る。"])
+        self.assertEqual(draft["step_video_timestamps"], [15, 90])
 
     def test_video_recipe_json_ld_prefills_ingredients_and_steps(self) -> None:
         payload = {
@@ -324,6 +339,7 @@ class RecipeTests(unittest.TestCase):
                         "video_url": "https://video.example.invalid/watch/1",
                         "portion_kind": "drink",
                         "serving_volume_ml": 300,
+                        "step_video_timestamps": "[12]",
                     },
                 },
             ]
@@ -334,6 +350,7 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(recipes[0]["video_url"], "https://video.example.invalid/watch/1")
         self.assertEqual(recipes[0]["portion_kind"], "drink")
         self.assertEqual(recipes[0]["serving_volume_ml"], 300)
+        self.assertEqual(recipes[0]["step_video_timestamps"], [12])
         self.assertEqual(recipes[0]["ingredients"][0]["note"], "架空の香辛料 適量")
         self.assertEqual(
             recipes[0]["image_url"],
@@ -354,6 +371,7 @@ class RecipeTests(unittest.TestCase):
             "portion_kind": "meat_main",
             "meat_g_per_person": 200,
             "rice_go_per_person": 0.375,
+            "step_video_timestamps": [20],
             "ingredients": [{"amount": 100, "unit": "g", "name": "架空豆", "note": ""}],
             "steps": ["架空の鍋で煮る。"],
             "tags": ["架空"],
@@ -365,6 +383,9 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(transport.calls[1]["body"]["extras"]["video_url"], recipe["video_url"])
         self.assertEqual(transport.calls[1]["body"]["extras"]["portion_kind"], "meat_main")
         self.assertEqual(transport.calls[1]["body"]["extras"]["rice_go_per_person"], 0.375)
+        self.assertEqual(
+            transport.calls[1]["body"]["extras"]["step_video_timestamps"], "[20]"
+        )
         self.assertEqual(transport.calls[1]["body"]["recipeIngredient"][0]["food"], "架空豆")
         self.assertEqual(transport.calls[1]["body"]["tags"], [{"name": "架空"}])
 

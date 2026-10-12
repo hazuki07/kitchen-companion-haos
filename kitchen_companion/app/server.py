@@ -76,6 +76,7 @@ class RecipeStore:
                     rice_go_per_person REAL NOT NULL DEFAULT 0,
                     ingredients_json TEXT NOT NULL,
                     steps_json TEXT NOT NULL,
+                    step_video_timestamps_json TEXT NOT NULL DEFAULT '[]',
                     tags_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -114,6 +115,7 @@ class RecipeStore:
                 "dilution_mixer_parts": "REAL NOT NULL DEFAULT 7",
                 "meat_g_per_person": "REAL NOT NULL DEFAULT 0",
                 "rice_go_per_person": "REAL NOT NULL DEFAULT 0",
+                "step_video_timestamps_json": "TEXT NOT NULL DEFAULT '[]'",
             }
             for column, definition in migrations.items():
                 if column not in columns:
@@ -148,7 +150,9 @@ class RecipeStore:
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
-        for key in ("ingredients_json", "steps_json", "tags_json"):
+        for key in (
+            "ingredients_json", "steps_json", "step_video_timestamps_json", "tags_json"
+        ):
             result[key.removesuffix("_json")] = json.loads(result.pop(key))
         result["source_kind"] = "draft"
         result["read_only"] = False
@@ -208,8 +212,9 @@ class RecipeStore:
                    (id, title, description, servings, source_url, video_url, image_url,
                     portion_kind, serving_volume_ml, dilution_concentrate_parts,
                     dilution_mixer_parts, meat_g_per_person, rice_go_per_person,
-                    ingredients_json, steps_json, tags_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ingredients_json, steps_json, step_video_timestamps_json,
+                    tags_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title, description=excluded.description,
                     servings=excluded.servings, source_url=excluded.source_url,
@@ -221,7 +226,9 @@ class RecipeStore:
                     meat_g_per_person=excluded.meat_g_per_person,
                     rice_go_per_person=excluded.rice_go_per_person,
                     ingredients_json=excluded.ingredients_json,
-                    steps_json=excluded.steps_json, tags_json=excluded.tags_json,
+                    steps_json=excluded.steps_json,
+                    step_video_timestamps_json=excluded.step_video_timestamps_json,
+                    tags_json=excluded.tags_json,
                     updated_at=excluded.updated_at""",
                 (
                     recipe_id,
@@ -239,6 +246,7 @@ class RecipeStore:
                     recipe["rice_go_per_person"],
                     json.dumps(recipe["ingredients"], ensure_ascii=False),
                     json.dumps(recipe["steps"], ensure_ascii=False),
+                    json.dumps(recipe["step_video_timestamps"], ensure_ascii=False),
                     json.dumps(recipe["tags"], ensure_ascii=False),
                     created_at,
                     now,
@@ -359,6 +367,47 @@ class RecipeStore:
         return result
 
 
+def parse_video_timestamp(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        raise ValueError("工程動画の開始位置を正しく入力してください")
+    if isinstance(value, (int, float)):
+        seconds = int(value)
+    else:
+        text = str(value).strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", text):
+            seconds = int(float(text))
+        else:
+            match = re.fullmatch(r"(?:(\d{1,2}):)?(\d{1,3}):(\d{2})", text)
+            if not match:
+                raise ValueError("工程動画の開始位置は mm:ss または hh:mm:ss で入力してください")
+            hours = int(match.group(1) or 0)
+            minutes = int(match.group(2))
+            tail_seconds = int(match.group(3))
+            if tail_seconds >= 60 or (match.group(1) and minutes >= 60):
+                raise ValueError("工程動画の開始位置を正しく入力してください")
+            seconds = hours * 3600 + minutes * 60 + tail_seconds
+    if not 0 <= seconds <= 86_400:
+        raise ValueError("工程動画の開始位置は24時間以内にしてください")
+    return seconds
+
+
+def steps_with_video_timestamps(steps: list[str]) -> tuple[list[str], list[int | None]]:
+    clean_steps: list[str] = []
+    timestamps: list[int | None] = []
+    pattern = re.compile(r"^\s*\[?((?:\d{1,2}:)?\d{1,3}:\d{2})\]?\s*[-–—]?\s*(.+)$")
+    for step in steps:
+        match = pattern.match(step)
+        if match:
+            timestamps.append(parse_video_timestamp(match.group(1)))
+            clean_steps.append(match.group(2).strip())
+        else:
+            timestamps.append(None)
+            clean_steps.append(step)
+    return clean_steps, timestamps
+
+
 def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("レシピの形式が正しくありません")
@@ -393,8 +442,14 @@ def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
     rice_go_per_person = portion_number("rice_go_per_person", 0, 0, 5)
     ingredients = raw.get("ingredients", [])
     steps = raw.get("steps", [])
+    step_video_timestamps = raw.get("step_video_timestamps", [])
     tags = raw.get("tags", [])
-    if not isinstance(ingredients, list) or not isinstance(steps, list) or not isinstance(tags, list):
+    if (
+        not isinstance(ingredients, list)
+        or not isinstance(steps, list)
+        or not isinstance(step_video_timestamps, list)
+        or not isinstance(tags, list)
+    ):
         raise ValueError("材料、工程、タグの形式が正しくありません")
     clean_ingredients = []
     for item in ingredients[:200]:
@@ -417,7 +472,18 @@ def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
                     "note": str(item.get("note", ""))[:200],
                 }
             )
-    clean_steps = [str(step).strip()[:2000] for step in steps[:100] if str(step).strip()]
+    clean_steps: list[str] = []
+    clean_timestamps: list[int | None] = []
+    for index, step in enumerate(steps[:100]):
+        clean_step = str(step).strip()[:2000]
+        if not clean_step:
+            continue
+        clean_steps.append(clean_step)
+        clean_timestamps.append(
+            parse_video_timestamp(step_video_timestamps[index])
+            if index < len(step_video_timestamps)
+            else None
+        )
     return {
         "title": title,
         "description": str(raw.get("description", "")).strip()[:2000],
@@ -433,6 +499,7 @@ def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
         "rice_go_per_person": rice_go_per_person,
         "ingredients": clean_ingredients,
         "steps": clean_steps,
+        "step_video_timestamps": clean_timestamps,
         "tags": [str(tag).strip()[:50] for tag in tags[:30] if str(tag).strip()],
     }
 
@@ -618,7 +685,7 @@ def extract_description_recipe(description: str) -> tuple[float, list[dict[str, 
             continue
         cleaned = re.sub(r"^[\s・●◯○■□✓✔*-]+", "", line)
         if section == "steps":
-            cleaned = re.sub(r"^\d+[.)．、:]\s*", "", cleaned)
+            cleaned = re.sub(r"^\d+[.)．、:](?!\d)\s*", "", cleaned)
         if not cleaned:
             continue
         if section == "ingredients" and len(ingredients) < 200:
@@ -701,6 +768,9 @@ def recipe_draft_from_node(node: dict[str, Any], source_url: str, video_url: str
         yield_value = yield_value[0] if yield_value else 2
     match = re.search(r"\d+(?:\.\d+)?", str(yield_value))
     servings = float(match.group()) if match else 2
+    steps, step_video_timestamps = steps_with_video_timestamps(
+        flatten_steps(node.get("recipeInstructions", []))
+    )
     return validate_recipe(
         {
             "title": node.get("name", "取り込んだレシピ"),
@@ -710,7 +780,8 @@ def recipe_draft_from_node(node: dict[str, Any], source_url: str, video_url: str
             "video_url": video_url or extract_video_url(node.get("video")),
             "image_url": urljoin(source_url, str(image)) if image else "",
             "ingredients": [parse_ingredient(item) for item in node.get("recipeIngredient", [])],
-            "steps": flatten_steps(node.get("recipeInstructions", [])),
+            "steps": steps,
+            "step_video_timestamps": step_video_timestamps,
             "tags": ["動画"] if video_url else [],
         }
     )
@@ -745,6 +816,7 @@ def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
     if not image:
         image = metadata.metadata.get("og:image") or metadata.metadata.get("twitter:image") or ""
     servings, ingredients, steps = extract_description_recipe(description)
+    steps, step_video_timestamps = steps_with_video_timestamps(steps)
     try:
         image_url = safe_image_url(urljoin(url, str(image or "")))
     except ValueError:
@@ -759,6 +831,7 @@ def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
             "image_url": image_url,
             "ingredients": ingredients,
             "steps": steps,
+            "step_video_timestamps": step_video_timestamps,
             "tags": ["動画"],
         }
     )
@@ -932,7 +1005,7 @@ class AppHandler(BaseHTTPRequestHandler):
                             "portion_kind", "serving_volume_ml",
                             "dilution_concentrate_parts", "dilution_mixer_parts",
                             "meat_g_per_person", "rice_go_per_person",
-                            "ingredients", "steps", "tags",
+                            "ingredients", "steps", "step_video_timestamps", "tags",
                         )},
                         ensure_ascii=False,
                         sort_keys=True,

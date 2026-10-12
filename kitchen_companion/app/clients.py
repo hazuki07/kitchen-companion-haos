@@ -157,6 +157,21 @@ def _number(value: Any) -> float | None:
     return None
 
 
+def _timestamp_list(value: Any, length: int) -> list[int | None]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = []
+    if not isinstance(value, list):
+        value = []
+    result: list[int | None] = []
+    for item in value[:length]:
+        number = _number(item)
+        result.append(int(number) if number is not None and 0 <= number <= 86_400 else None)
+    return result + [None] * (length - len(result))
+
+
 def _ingredient(raw: Any) -> dict[str, Any] | None:
     if isinstance(raw, str):
         return {"amount": None, "unit": "", "name": raw[:200], "note": "未確認"}
@@ -266,6 +281,7 @@ class MealieReadClient:
             portion_kind = "standard"
         image_id = str(raw.get("id") or "")
         image_url = f"api/catalog/images/{quote(image_id, safe='')}" if raw.get("image") and image_id else ""
+        steps = _instructions(raw.get("recipeInstructions"))
         return {
             "id": str(raw.get("slug") or raw.get("id") or recipe_id),
             "title": str(raw.get("name") or "料理名未確認")[:160],
@@ -284,7 +300,10 @@ class MealieReadClient:
             "meat_g_per_person": _number(extras.get("meat_g_per_person")) or 0,
             "rice_go_per_person": _number(extras.get("rice_go_per_person")) or 0,
             "ingredients": ingredients,
-            "steps": _instructions(raw.get("recipeInstructions")),
+            "steps": steps,
+            "step_video_timestamps": _timestamp_list(
+                extras.get("step_video_timestamps"), len(steps)
+            ),
             "tags": [
                 str(tag.get("name") if isinstance(tag, dict) else tag)[:50]
                 for tag in tags[:30]
@@ -371,6 +390,9 @@ class MealieSyncClient:
                 "dilution_mixer_parts": recipe.get("dilution_mixer_parts", 7),
                 "meat_g_per_person": recipe.get("meat_g_per_person", 0),
                 "rice_go_per_person": recipe.get("rice_go_per_person", 0),
+                "step_video_timestamps": json.dumps(
+                    recipe.get("step_video_timestamps", []), ensure_ascii=False
+                ),
             },
         }
         self.transport.request(

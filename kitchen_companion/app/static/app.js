@@ -8,6 +8,7 @@ const state = {
   timerPending: false,
   recognition: null,
   cookRecognition: null,
+  cookRecognitions: new Set(),
   cookVoiceEnabled: false,
   cookVoicePaused: false,
   cookVoiceRestartTimer: null,
@@ -57,7 +58,7 @@ function safeUrl(value = "") {
   } catch { return ""; }
 }
 
-function videoEmbedUrl(value = "") {
+function videoEmbedUrl(value = "", startSeconds = 0) {
   const url = safeUrl(value);
   if (!url) return "";
   const parsed = new URL(url);
@@ -72,11 +73,15 @@ function videoEmbedUrl(value = "") {
     }
   }
   if (/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) {
-    return `https://www.youtube-nocookie.com/embed/${videoId}`;
+    const start = Math.max(0, Math.floor(Number(startSeconds) || 0));
+    return `https://www.youtube-nocookie.com/embed/${videoId}${start ? `?start=${start}` : ""}`;
   }
   if (["vimeo.com", "www.vimeo.com", "player.vimeo.com"].includes(hostname)) {
     const videoNumber = parsed.pathname.split("/").filter(Boolean).find((part) => /^\d+$/.test(part));
-    if (videoNumber) return `https://player.vimeo.com/video/${videoNumber}`;
+    if (videoNumber) {
+      const start = Math.max(0, Math.floor(Number(startSeconds) || 0));
+      return `https://player.vimeo.com/video/${videoNumber}${start ? `#t=${start}s` : ""}`;
+    }
   }
   return "";
 }
@@ -119,6 +124,17 @@ function formatServings(value) {
   if (Number.isInteger(number)) return formatNumber(number);
   if (Number.isInteger(number * 2)) return `${Math.round(number * 2)}/2`;
   return formatNumber(number);
+}
+
+function formatVideoTimestamp(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "";
+  const total = Math.max(0, Math.floor(Number(value)));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = String(total % 60).padStart(2, "0");
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`
+    : `${String(minutes).padStart(2, "0")}:${seconds}`;
 }
 
 function scaledIngredient(item, base, target, canScale = true) {
@@ -286,7 +302,7 @@ function renderDetail() {
     <div class="detail-hero">
       <div class="detail-image">${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(recipe.title)}">` : ""}</div>
       <div class="detail-copy"><p class="eyebrow">READY TO COOK</p><h1>${escapeHtml(recipe.title)}</h1><p>${escapeHtml(recipe.description)}</p>
-        <div class="serving-control">${servingsConfirmed ? `<button data-serving="-1" aria-label="人数を減らす">−</button><strong>${formatServings(state.servings)}人分</strong><button data-serving="1" aria-label="人数を増やす">＋</button>` : "<strong>人数・換算は未確認</strong>"}</div>
+        <div class="serving-control">${servingsConfirmed ? `<button data-serving="-1" aria-label="人数を減らす">−</button><strong>${formatServings(state.servings)}人分</strong>` : "<strong>人数・換算は未確認</strong>"}</div>
         <div class="quantity-mode" aria-label="分量の表示方法">
           <button class="${showingGuidance ? "" : "active"}" data-quantity-mode="recipe" aria-pressed="${!showingGuidance}">メニューの分量</button>
           <button class="${showingGuidance ? "active" : ""}" data-quantity-mode="guidance" aria-pressed="${showingGuidance}" ${guidance.length ? "" : "disabled"}>1人分の適量</button>
@@ -388,6 +404,9 @@ function openEditor(recipe = null, videoOnly = false) {
   $("#descriptionField").value = recipe?.description || "";
   $("#ingredientsField").value = recipe?.ingredients?.map((item) => item.amount == null ? `${item.name}${item.note ? `（${item.note}）` : ""}` : `${formatNumber(item.amount)} | ${item.unit} | ${item.name}`).join("\n") || "";
   $("#stepsField").value = recipe?.steps?.join("\n") || "";
+  $("#stepTimestampsField").value = recipe?.steps?.map((_, index) => (
+    formatVideoTimestamp(recipe?.step_video_timestamps?.[index])
+  )).join("\n") || "";
   $("#sourceField").value = recipe?.source_url || "";
   $("#videoField").value = recipe?.video_url || "";
   $("#formMessage").textContent = "";
@@ -412,6 +431,8 @@ async function saveRecipe(event) {
     description: $("#descriptionField").value,
     ingredients: $("#ingredientsField").value.split("\n").map((line) => line.trim()).filter(Boolean).map(parseIngredientLine),
     steps: $("#stepsField").value.split("\n").map((line) => line.trim()).filter(Boolean),
+    step_video_timestamps: $("#stepTimestampsField").value
+      .split("\n").map((line) => line.trim()),
     source_url: $("#sourceField").value,
     video_url: $("#videoField").value,
     image_url: state.editorImage,
@@ -531,11 +552,12 @@ function startCookRecognitionSession() {
 
   const generation = state.cookVoiceGeneration;
   const recognition = new SpeechRecognition();
+  state.cookRecognitions.add(recognition);
   const startedAt = Date.now();
   const isCurrent = () => generation === state.cookVoiceGeneration
     && state.cookVoiceEnabled && state.cookRecognition === recognition;
   recognition.lang = "ja-JP";
-  recognition.continuous = true;
+  recognition.continuous = false;
   recognition.interimResults = false;
   recognition.onstart = () => {
     if (!isCurrent()) {
@@ -573,6 +595,7 @@ function startCookRecognitionSession() {
     }
   };
   recognition.onend = () => {
+    state.cookRecognitions.delete(recognition);
     clearTimeout(state.cookVoiceWatchdogTimer);
     if (state.cookRecognition === recognition) state.cookRecognition = null;
     $("#cookVoice").classList.remove("listening");
@@ -586,6 +609,7 @@ function startCookRecognitionSession() {
   try {
     recognition.start();
   } catch {
+    state.cookRecognitions.delete(recognition);
     state.cookRecognition = null;
     state.cookVoiceRetryCount = Math.min(state.cookVoiceRetryCount + 1, 4);
     scheduleCookRecognition(Math.min(4_000, 500 * (2 ** state.cookVoiceRetryCount)));
@@ -645,17 +669,18 @@ function disableCookVoice(notify = true) {
   state.cookVoiceRestartTimer = null;
   state.cookVoiceWatchdogTimer = null;
   state.cookVoiceSpeechResumeTimer = null;
-  const recognition = state.cookRecognition;
   state.cookRecognition = null;
-  if (recognition) {
+  $("#cookVoice").classList.remove("listening");
+  updateCookVoiceButton();
+  window.speechSynthesis?.cancel();
+  for (const recognition of state.cookRecognitions) {
     recognition.onstart = null;
     recognition.onresult = null;
     recognition.onerror = null;
     recognition.onend = null;
     try { recognition.abort(); } catch { /* 既に終了している場合は停止済み */ }
   }
-  $("#cookVoice").classList.remove("listening");
-  updateCookVoiceButton();
+  state.cookRecognitions.clear();
   if (notify) showToast("音声操作をOFFにしました");
 }
 
@@ -692,6 +717,10 @@ function speak(text) {
     );
   }
   speechSynthesis.speak(utterance);
+}
+
+function speakOnConfiguredOutput(text) {
+  if (state.runtime?.speech === "browser") speak(text);
 }
 
 function pauseCookRecognitionForRemoteSpeech(text) {
@@ -742,7 +771,7 @@ function preparationSpeech() {
 function announceCurrentCookStage() {
   if (!state.cookVoiceEnabled || !state.selected) return;
   if (state.step === -1) {
-    speak(preparationSpeech());
+    speakOnConfiguredOutput(preparationSpeech());
     return;
   }
   sendCookingAction("show", true).catch((error) => showToast(error.message));
@@ -787,16 +816,12 @@ async function sendCookingAction(operation, speakRequested = false) {
 async function startCooking() {
   if (!state.selected?.steps.length) { showToast("工程を登録してください"); return; }
   try {
+    disableCookVoice(false);
     state.step = hasPreparationStage() ? -1 : 0;
     $("#cookMode").classList.remove("hidden");
     document.body.style.overflow = "hidden";
     renderCookStep();
-    await enableCookVoice(false);
-    if (state.step === -1) {
-      if (state.cookVoiceEnabled) speak(preparationSpeech());
-    } else {
-      await sendCookingAction("start", state.cookVoiceEnabled);
-    }
+    if (state.step !== -1) await sendCookingAction("start", false);
   } catch (error) { showToast(error.message); }
 }
 
@@ -811,6 +836,12 @@ function renderCookStep() {
   $("#stepNumber").classList.toggle("preparation", preparing);
   $("#stepNumber").textContent = preparing ? "準備" : state.step + 1;
   $("#stepText").textContent = preparing ? "材料を準備しましょう" : recipe.steps[state.step];
+  const videoStart = preparing ? 0 : recipe.step_video_timestamps?.[state.step] || 0;
+  const cookVideoUrl = videoEmbedUrl(recipe.video_url, videoStart);
+  $("#cookVideo").classList.toggle("hidden", !cookVideoUrl);
+  $("#cookVideo").innerHTML = cookVideoUrl
+    ? `<div class="cook-video-frame"><iframe src="${escapeHtml(cookVideoUrl)}" title="${escapeHtml(recipe.title)} ${preparing ? "準備" : `工程${state.step + 1}`}の動画" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div>${videoStart ? `<small>${escapeHtml(formatVideoTimestamp(videoStart))}から表示</small>` : ""}`
+    : "";
   $("#preparationList").classList.toggle("hidden", !preparing);
   $("#preparationList").innerHTML = preparing
     ? preparationItems().map((item) => `<li><span>${escapeHtml(item.name)}${item.note ? `<small>${escapeHtml(item.note)}</small>` : ""}</span><strong>${escapeHtml(item.amount)}</strong></li>`).join("")
@@ -835,12 +866,12 @@ async function changeStep(direction) {
   if (direction < 0 && state.step === 0 && hasPreparationStage()) {
     state.step = -1;
     renderCookStep();
-    if (state.cookVoiceEnabled) speak(preparationSpeech());
+    if (state.cookVoiceEnabled) speakOnConfiguredOutput(preparationSpeech());
     return;
   }
   const last = state.selected.steps.length - 1;
   if (direction > 0 && state.step === last) {
-    speak("おつかれさまでした。料理のできあがりです。");
+    speakOnConfiguredOutput("おつかれさまでした。料理のできあがりです。");
     showToast("できあがり！");
     return;
   }
@@ -852,7 +883,7 @@ async function selectCookStage(step) {
   if (step === -1 && hasPreparationStage()) {
     state.step = -1;
     renderCookStep();
-    if (state.cookVoiceEnabled) speak(preparationSpeech());
+    if (state.cookVoiceEnabled) speakOnConfiguredOutput(preparationSpeech());
     return;
   }
   if (step < 0 || step >= state.selected.steps.length) return;

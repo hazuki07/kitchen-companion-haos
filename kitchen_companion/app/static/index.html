@@ -22,7 +22,6 @@
       </nav>
       <div class="top-actions">
         <span class="status-chip" id="runtimeStatus"><span></span> 接続状態を確認中</span>
-        <button class="icon-button" data-mode="import" aria-label="レシピ取り込みを開く">＋</button>
       </div>
     </header>
 
@@ -137,6 +136,7 @@
         <label class="wide">ひとこと<textarea id="descriptionField" rows="2" placeholder="味や作り方のメモ"></textarea></label>
         <label class="wide">材料 <small>1行に「量 | 単位 | 材料名」。量を省く場合は「材料名」だけでもOK</small><textarea id="ingredientsField" rows="7" placeholder="300 | g | 鶏もも肉&#10;1 | 個 | 玉ねぎ&#10;塩・こしょう（適量）"></textarea></label>
         <label class="wide">工程 <small>1行を1工程として登録します</small><textarea id="stepsField" rows="8" placeholder="材料を切ります。&#10;フライパンを中火で熱します。"></textarea></label>
+        <label class="wide">工程動画の開始位置 <small>工程と同じ順で1行ずつ。空行または mm:ss（例：01:30）</small><textarea id="stepTimestampsField" rows="5" placeholder="00:15&#10;01:30&#10;03:45"></textarea></label>
         <label class="wide">出典URL<input id="sourceField" type="url" placeholder="https://…"></label>
         <label class="wide">動画URL<input id="videoField" type="url" placeholder="https://youtube.com/…"></label>
       </div>
@@ -157,6 +157,7 @@
         <p class="eyebrow">CURRENT STEP</p>
         <div class="step-number" id="stepNumber"></div>
         <p id="stepText"></p>
+        <div class="cook-video hidden" id="cookVideo"></div>
         <ul class="cook-preparation hidden" id="preparationList"></ul>
         <form class="cook-command" id="cookCommandForm">
           <label class="sr-only" for="cookCommandInput">調理コマンド</label>
