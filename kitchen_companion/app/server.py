@@ -68,6 +68,12 @@ class RecipeStore:
                     source_url TEXT NOT NULL DEFAULT '',
                     video_url TEXT NOT NULL DEFAULT '',
                     image_url TEXT NOT NULL DEFAULT '',
+                    portion_kind TEXT NOT NULL DEFAULT 'standard',
+                    serving_volume_ml REAL NOT NULL DEFAULT 300,
+                    dilution_concentrate_parts REAL NOT NULL DEFAULT 3,
+                    dilution_mixer_parts REAL NOT NULL DEFAULT 7,
+                    meat_g_per_person REAL NOT NULL DEFAULT 0,
+                    rice_go_per_person REAL NOT NULL DEFAULT 0,
                     ingredients_json TEXT NOT NULL,
                     steps_json TEXT NOT NULL,
                     tags_json TEXT NOT NULL DEFAULT '[]',
@@ -97,6 +103,21 @@ class RecipeStore:
                 );
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(recipes)").fetchall()
+            }
+            migrations = {
+                "portion_kind": "TEXT NOT NULL DEFAULT 'standard'",
+                "serving_volume_ml": "REAL NOT NULL DEFAULT 300",
+                "dilution_concentrate_parts": "REAL NOT NULL DEFAULT 3",
+                "dilution_mixer_parts": "REAL NOT NULL DEFAULT 7",
+                "meat_g_per_person": "REAL NOT NULL DEFAULT 0",
+                "rice_go_per_person": "REAL NOT NULL DEFAULT 0",
+            }
+            for column, definition in migrations.items():
+                if column not in columns:
+                    db.execute(f"ALTER TABLE recipes ADD COLUMN {column} {definition}")
             count = db.execute("SELECT COUNT(*) FROM recipes").fetchone()[0]
             if count == 0:
                 self.save(
@@ -185,12 +206,20 @@ class RecipeStore:
             db.execute(
                 """INSERT INTO recipes
                    (id, title, description, servings, source_url, video_url, image_url,
+                    portion_kind, serving_volume_ml, dilution_concentrate_parts,
+                    dilution_mixer_parts, meat_g_per_person, rice_go_per_person,
                     ingredients_json, steps_json, tags_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title, description=excluded.description,
                     servings=excluded.servings, source_url=excluded.source_url,
                     video_url=excluded.video_url, image_url=excluded.image_url,
+                    portion_kind=excluded.portion_kind,
+                    serving_volume_ml=excluded.serving_volume_ml,
+                    dilution_concentrate_parts=excluded.dilution_concentrate_parts,
+                    dilution_mixer_parts=excluded.dilution_mixer_parts,
+                    meat_g_per_person=excluded.meat_g_per_person,
+                    rice_go_per_person=excluded.rice_go_per_person,
                     ingredients_json=excluded.ingredients_json,
                     steps_json=excluded.steps_json, tags_json=excluded.tags_json,
                     updated_at=excluded.updated_at""",
@@ -202,6 +231,12 @@ class RecipeStore:
                     recipe["source_url"],
                     recipe["video_url"],
                     recipe["image_url"],
+                    recipe["portion_kind"],
+                    recipe["serving_volume_ml"],
+                    recipe["dilution_concentrate_parts"],
+                    recipe["dilution_mixer_parts"],
+                    recipe["meat_g_per_person"],
+                    recipe["rice_go_per_person"],
                     json.dumps(recipe["ingredients"], ensure_ascii=False),
                     json.dumps(recipe["steps"], ensure_ascii=False),
                     json.dumps(recipe["tags"], ensure_ascii=False),
@@ -336,6 +371,26 @@ def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("人数を正しく入力してください") from exc
     if not 0 < servings <= 100:
         raise ValueError("人数は0より大きく100以下にしてください")
+    portion_kind = str(raw.get("portion_kind") or "standard")
+    portion_kinds = {"standard", "meat_main", "mixed_meat", "drink", "diluted_drink"}
+    if portion_kind not in portion_kinds:
+        raise ValueError("分量タイプが正しくありません")
+
+    def portion_number(key: str, default: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(raw.get(key, default))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("1人分の目安量を正しく入力してください") from exc
+        if not minimum <= value <= maximum:
+            raise ValueError("1人分の目安量が範囲外です")
+        return value
+
+    default_meat = 200 if portion_kind == "meat_main" else 150 if portion_kind == "mixed_meat" else 0
+    serving_volume_ml = portion_number("serving_volume_ml", 300, 50, 2000)
+    dilution_concentrate_parts = portion_number("dilution_concentrate_parts", 3, 0.1, 100)
+    dilution_mixer_parts = portion_number("dilution_mixer_parts", 7, 0.1, 100)
+    meat_g_per_person = portion_number("meat_g_per_person", default_meat, 0, 1000)
+    rice_go_per_person = portion_number("rice_go_per_person", 0, 0, 5)
     ingredients = raw.get("ingredients", [])
     steps = raw.get("steps", [])
     tags = raw.get("tags", [])
@@ -370,6 +425,12 @@ def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
         "source_url": safe_http_url(raw.get("source_url", ""), allow_empty=True),
         "video_url": safe_http_url(raw.get("video_url", ""), allow_empty=True),
         "image_url": safe_image_url(raw.get("image_url", "")),
+        "portion_kind": portion_kind,
+        "serving_volume_ml": serving_volume_ml,
+        "dilution_concentrate_parts": dilution_concentrate_parts,
+        "dilution_mixer_parts": dilution_mixer_parts,
+        "meat_g_per_person": meat_g_per_person,
+        "rice_go_per_person": rice_go_per_person,
         "ingredients": clean_ingredients,
         "steps": clean_steps,
         "tags": [str(tag).strip()[:50] for tag in tags[:30] if str(tag).strip()],
@@ -868,6 +929,9 @@ class AppHandler(BaseHTTPRequestHandler):
                     json.dumps(
                         {key: recipe.get(key) for key in (
                             "title", "description", "servings", "source_url", "video_url",
+                            "portion_kind", "serving_volume_ml",
+                            "dilution_concentrate_parts", "dilution_mixer_parts",
+                            "meat_g_per_person", "rice_go_per_person",
                             "ingredients", "steps", "tags",
                         )},
                         ensure_ascii=False,
@@ -1074,7 +1138,8 @@ class AppHandler(BaseHTTPRequestHandler):
         content_security_policy = (
             "default-src 'self'; img-src 'self' https: data:; style-src 'self'; "
             "script-src 'self'; media-src https:; "
-            "frame-src https://www.youtube.com https://www.youtube-nocookie.com"
+            "frame-src https://www.youtube.com https://www.youtube-nocookie.com "
+            "https://player.vimeo.com"
         )
         self.send_header("Content-Security-Policy", content_security_policy)
         self.end_headers()

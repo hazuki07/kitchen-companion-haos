@@ -258,6 +258,12 @@ class MealieReadClient:
         ingredients = [item for value in raw.get("recipeIngredient", []) if (item := _ingredient(value))]
         servings = _number(raw.get("recipeServings") or raw.get("recipeYield"))
         tags = raw.get("tags", []) if isinstance(raw.get("tags"), list) else []
+        extras = raw.get("extras") if isinstance(raw.get("extras"), dict) else {}
+        portion_kind = str(extras.get("portion_kind") or "standard")
+        if portion_kind not in {
+            "standard", "meat_main", "mixed_meat", "drink", "diluted_drink"
+        }:
+            portion_kind = "standard"
         image_id = str(raw.get("id") or "")
         image_url = f"api/catalog/images/{quote(image_id, safe='')}" if raw.get("image") and image_id else ""
         return {
@@ -269,6 +275,14 @@ class MealieReadClient:
             "source_url": _http_url(raw.get("orgURL")),
             "video_url": _video_url(raw),
             "image_url": image_url,
+            "portion_kind": portion_kind,
+            "serving_volume_ml": _number(extras.get("serving_volume_ml")) or 300,
+            "dilution_concentrate_parts": (
+                _number(extras.get("dilution_concentrate_parts")) or 3
+            ),
+            "dilution_mixer_parts": _number(extras.get("dilution_mixer_parts")) or 7,
+            "meat_g_per_person": _number(extras.get("meat_g_per_person")) or 0,
+            "rice_go_per_person": _number(extras.get("rice_go_per_person")) or 0,
             "ingredients": ingredients,
             "steps": _instructions(raw.get("recipeInstructions")),
             "tags": [
@@ -349,7 +363,15 @@ class MealieSyncClient:
             "tags": [
                 {"name": str(tag)[:50]} for tag in recipe.get("tags", []) if str(tag).strip()
             ],
-            "extras": {"video_url": str(recipe.get("video_url") or "")},
+            "extras": {
+                "video_url": str(recipe.get("video_url") or ""),
+                "portion_kind": str(recipe.get("portion_kind") or "standard"),
+                "serving_volume_ml": recipe.get("serving_volume_ml", 300),
+                "dilution_concentrate_parts": recipe.get("dilution_concentrate_parts", 3),
+                "dilution_mixer_parts": recipe.get("dilution_mixer_parts", 7),
+                "meat_g_per_person": recipe.get("meat_g_per_person", 0),
+                "rice_go_per_person": recipe.get("rice_go_per_person", 0),
+            },
         }
         self.transport.request(
             "PATCH",

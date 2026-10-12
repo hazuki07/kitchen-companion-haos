@@ -76,17 +76,58 @@ class RecipeTests(unittest.TestCase):
                 {
                     "title": "架空の豆スープ",
                     "servings": 4,
+                    "portion_kind": "mixed_meat",
+                    "meat_g_per_person": 150,
+                    "rice_go_per_person": 0.375,
                     "ingredients": [{"amount": 200, "unit": "g", "name": "豆"}],
                     "steps": ["鍋で煮る。"],
                     "tags": ["架空", "スープ"],
                 }
             )
             self.assertEqual(store.get(saved["id"])["title"], "架空の豆スープ")
+            self.assertEqual(store.get(saved["id"])["portion_kind"], "mixed_meat")
+            self.assertEqual(store.get(saved["id"])["rice_go_per_person"], 0.375)
             self.assertEqual([item["id"] for item in store.list("豆")], [saved["id"]])
 
     def test_validation_rejects_bad_servings(self) -> None:
         with self.assertRaisesRegex(ValueError, "人数"):
             validate_recipe({"title": "架空", "servings": 0, "ingredients": [], "steps": []})
+
+    def test_portion_guidance_defaults_are_separate_from_recipe_amounts(self) -> None:
+        recipe = validate_recipe(
+            {
+                "title": "架空の希釈ドリンク",
+                "servings": 2,
+                "portion_kind": "diluted_drink",
+                "rice_go_per_person": 0.375,
+                "ingredients": [{"amount": 500, "unit": "ml", "name": "レシピ記載の液体"}],
+                "steps": ["架空の容器で混ぜる。"],
+            }
+        )
+        self.assertEqual(recipe["ingredients"][0]["amount"], 500)
+        self.assertEqual(recipe["serving_volume_ml"], 300)
+        self.assertEqual(recipe["dilution_concentrate_parts"], 3)
+        self.assertEqual(recipe["dilution_mixer_parts"], 7)
+        self.assertEqual(recipe["rice_go_per_person"], 0.375)
+
+    def test_meat_portion_defaults_depend_on_recipe_kind(self) -> None:
+        common = {"title": "架空の肉料理", "servings": 1, "ingredients": [], "steps": []}
+        main = validate_recipe({**common, "portion_kind": "meat_main"})
+        mixed = validate_recipe({**common, "portion_kind": "mixed_meat"})
+        self.assertEqual(main["meat_g_per_person"], 200)
+        self.assertEqual(mixed["meat_g_per_person"], 150)
+
+    def test_validation_rejects_unknown_portion_kind(self) -> None:
+        with self.assertRaisesRegex(ValueError, "分量タイプ"):
+            validate_recipe(
+                {
+                    "title": "架空",
+                    "servings": 1,
+                    "portion_kind": "unknown",
+                    "ingredients": [],
+                    "steps": [],
+                }
+            )
 
     def test_fraction_ingredient(self) -> None:
         parsed = parse_ingredient("1/2 個 玉ねぎ")
@@ -279,7 +320,11 @@ class RecipeTests(unittest.TestCase):
                     "recipeIngredient": [{"display": "架空の香辛料 適量"}],
                     "recipeInstructions": [{"text": "架空の鍋で煮る。"}],
                     "tags": [{"name": "架空"}],
-                    "extras": {"video_url": "https://video.example.invalid/watch/1"},
+                    "extras": {
+                        "video_url": "https://video.example.invalid/watch/1",
+                        "portion_kind": "drink",
+                        "serving_volume_ml": 300,
+                    },
                 },
             ]
         )
@@ -287,6 +332,8 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(recipes[0]["title"], "架空スープ")
         self.assertFalse(recipes[0]["servings_confirmed"])
         self.assertEqual(recipes[0]["video_url"], "https://video.example.invalid/watch/1")
+        self.assertEqual(recipes[0]["portion_kind"], "drink")
+        self.assertEqual(recipes[0]["serving_volume_ml"], 300)
         self.assertEqual(recipes[0]["ingredients"][0]["note"], "架空の香辛料 適量")
         self.assertEqual(
             recipes[0]["image_url"],
@@ -304,6 +351,9 @@ class RecipeTests(unittest.TestCase):
             "servings": 2,
             "source_url": "https://recipes.example.invalid/fictional",
             "video_url": "https://video.example.invalid/watch/1",
+            "portion_kind": "meat_main",
+            "meat_g_per_person": 200,
+            "rice_go_per_person": 0.375,
             "ingredients": [{"amount": 100, "unit": "g", "name": "架空豆", "note": ""}],
             "steps": ["架空の鍋で煮る。"],
             "tags": ["架空"],
@@ -313,6 +363,8 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual([call["method"] for call in transport.calls], ["POST", "PATCH"])
         self.assertEqual(transport.calls[0]["body"], {"name": "架空スープ"})
         self.assertEqual(transport.calls[1]["body"]["extras"]["video_url"], recipe["video_url"])
+        self.assertEqual(transport.calls[1]["body"]["extras"]["portion_kind"], "meat_main")
+        self.assertEqual(transport.calls[1]["body"]["extras"]["rice_go_per_person"], 0.375)
         self.assertEqual(transport.calls[1]["body"]["recipeIngredient"][0]["food"], "架空豆")
         self.assertEqual(transport.calls[1]["body"]["tags"], [{"name": "架空"}])
 

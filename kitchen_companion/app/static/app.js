@@ -21,6 +21,7 @@ const state = {
   activeMode: "assist",
   sourceFilter: "all",
   catalogStatus: null,
+  quantityMode: "recipe",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -53,6 +54,30 @@ function safeUrl(value = "") {
     const url = new URL(value.replace(/^\//, ""), document.baseURI);
     return ["http:", "https:"].includes(url.protocol) ? url.href : "";
   } catch { return ""; }
+}
+
+function videoEmbedUrl(value = "") {
+  const url = safeUrl(value);
+  if (!url) return "";
+  const parsed = new URL(url);
+  const hostname = parsed.hostname.toLowerCase();
+  let videoId = "";
+  if (hostname === "youtu.be") videoId = parsed.pathname.split("/").filter(Boolean)[0] || "";
+  if (["youtube.com", "www.youtube.com", "m.youtube.com", "www.youtube-nocookie.com"].includes(hostname)) {
+    videoId = parsed.searchParams.get("v") || "";
+    if (!videoId) {
+      const parts = parsed.pathname.split("/").filter(Boolean);
+      if (["embed", "shorts", "live"].includes(parts[0])) videoId = parts[1] || "";
+    }
+  }
+  if (/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) {
+    return `https://www.youtube-nocookie.com/embed/${videoId}`;
+  }
+  if (["vimeo.com", "www.vimeo.com", "player.vimeo.com"].includes(hostname)) {
+    const videoNumber = parsed.pathname.split("/").filter(Boolean).find((part) => /^\d+$/.test(part));
+    if (videoNumber) return `https://player.vimeo.com/video/${videoNumber}`;
+  }
+  return "";
 }
 
 function showToast(message) {
@@ -99,6 +124,43 @@ function scaledIngredient(item, base, target, canScale = true) {
   if (item.amount == null) return item.note || "適量";
   if (!canScale) return `${formatNumber(item.amount)}${item.unit ? ` ${item.unit}` : ""}`;
   return `${formatNumber(Number(item.amount) * target / base)}${item.unit ? ` ${item.unit}` : ""}`;
+}
+
+function positiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function portionGuidance(recipe, servings = state.servings) {
+  const kind = recipe.portion_kind || "standard";
+  const people = positiveNumber(servings, 1);
+  const guidance = [];
+  if (["meat_main", "mixed_meat"].includes(kind)) {
+    const defaultGrams = kind === "meat_main" ? 200 : 150;
+    const grams = positiveNumber(recipe.meat_g_per_person, defaultGrams) * people;
+    guidance.push({ name: "肉の適量目安", amount: `${formatNumber(grams)} g` });
+  }
+  if (["drink", "diluted_drink"].includes(kind)) {
+    const total = positiveNumber(recipe.serving_volume_ml, 300) * people;
+    if (kind === "diluted_drink") {
+      const concentrate = positiveNumber(recipe.dilution_concentrate_parts, 3);
+      const mixer = positiveNumber(recipe.dilution_mixer_parts, 7);
+      const allParts = concentrate + mixer;
+      guidance.push({
+        name: "濃縮液の適量目安",
+        amount: `${formatNumber(total * concentrate / allParts)} ml`,
+      });
+      guidance.push({
+        name: "水・炭酸水の適量目安",
+        amount: `${formatNumber(total * mixer / allParts)} ml`,
+      });
+    } else {
+      guidance.push({ name: "ドリンク完成量の目安", amount: `${formatNumber(total)} ml` });
+    }
+  }
+  const rice = Number(recipe.rice_go_per_person || 0) * people;
+  if (rice > 0) guidance.push({ name: "ご飯の適量目安", amount: `${formatNumber(rice)} 合` });
+  return guidance;
 }
 
 async function loadRecipes(query = "") {
@@ -167,6 +229,7 @@ function openDetail(recipe) {
   setMode("assist", false);
   state.selected = recipe;
   state.servings = recipe.servings;
+  state.quantityMode = "recipe";
   renderDetail();
   $("#homeView").classList.add("hidden");
   $("#detailView").classList.remove("hidden");
@@ -202,7 +265,11 @@ function renderDetail() {
   const image = safeUrl(recipe.image_url);
   const source = safeUrl(recipe.source_url);
   const video = safeUrl(recipe.video_url);
+  const embeddedVideo = videoEmbedUrl(recipe.video_url);
   const servingsConfirmed = recipe.servings_confirmed !== false;
+  const guidance = portionGuidance(recipe);
+  if (!guidance.length) state.quantityMode = "recipe";
+  const showingGuidance = state.quantityMode === "guidance";
   const syncButton = !recipe.read_only && state.runtime?.mealie_sync_enabled
     ? recipe.mealie_sync_status === "synced"
       ? '<button class="secondary-button" disabled>Mealie同期済み</button>'
@@ -219,12 +286,19 @@ function renderDetail() {
       <div class="detail-image">${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(recipe.title)}">` : ""}</div>
       <div class="detail-copy"><p class="eyebrow">READY TO COOK</p><h1>${escapeHtml(recipe.title)}</h1><p>${escapeHtml(recipe.description)}</p>
         <div class="serving-control">${servingsConfirmed ? `<button data-serving="-1" aria-label="人数を減らす">−</button><strong>${formatServings(state.servings)}人分</strong><button data-serving="1" aria-label="人数を増やす">＋</button>` : "<strong>人数・換算は未確認</strong>"}</div>
+        <div class="quantity-mode" aria-label="分量の表示方法">
+          <button class="${showingGuidance ? "" : "active"}" data-quantity-mode="recipe" aria-pressed="${!showingGuidance}">メニューの分量</button>
+          <button class="${showingGuidance ? "active" : ""}" data-quantity-mode="guidance" aria-pressed="${showingGuidance}" ${guidance.length ? "" : "disabled"}>1人分の適量</button>
+        </div>
         <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button><button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button>${syncButton}${deleteControl}</div>
       </div>
     </div>
-    <div class="recipe-columns"><section><p class="eyebrow">INGREDIENTS</p><h2>材料</h2><ul class="ingredient-list">
-      ${recipe.ingredients.map((item) => `<li><span>${escapeHtml(item.name)}${item.note ? `<small> ${escapeHtml(item.note)}</small>` : ""}</span><strong>${escapeHtml(scaledIngredient(item, recipe.servings, state.servings, servingsConfirmed))}</strong></li>`).join("")}
-      </ul>${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">出典ページを開く</a>` : ""}${video ? `<br><a class="source-link" href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">動画を開く</a>` : ""}</section>
+    ${embeddedVideo ? `<section class="video-panel"><div class="video-frame"><iframe src="${escapeHtml(embeddedVideo)}" title="${escapeHtml(recipe.title)}の料理動画" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div><a class="source-link" href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">動画を別画面で開く</a></section>` : ""}
+    <div class="recipe-columns"><section><p class="eyebrow">${showingGuidance ? "PORTION GUIDE" : "INGREDIENTS"}</p><h2>${showingGuidance ? "1人分の適量から計算" : "メニュー（レシピ）の分量"}</h2>
+      ${showingGuidance ? '<p class="quantity-note">一般的な適量の目安です。レシピに記載された分量とは別に表示しています。</p>' : ""}
+      <ul class="ingredient-list">
+      ${(showingGuidance ? guidance : recipe.ingredients.map((item) => ({ ...item, amount_label: scaledIngredient(item, recipe.servings, state.servings, servingsConfirmed) }))).map((item) => `<li><span>${escapeHtml(item.name)}${item.note ? `<small> ${escapeHtml(item.note)}</small>` : ""}</span><strong>${escapeHtml(item.amount_label || item.amount)}</strong></li>`).join("")}
+      </ul>${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">出典ページを開く</a>` : ""}${video && !embeddedVideo ? `<br><a class="source-link" href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">動画を開く</a>` : ""}</section>
       <section><p class="eyebrow">DIRECTIONS</p><h2>作り方</h2><ol class="steps-list">${recipe.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section></div>`;
 }
 
@@ -280,12 +354,35 @@ function parseIngredientLine(line) {
   return { amount: null, unit: "", name: line.trim(), note: "" };
 }
 
+function updatePortionFields(applyDefaults = false) {
+  const kind = $("#portionKindField").value;
+  const hasMeat = ["meat_main", "mixed_meat"].includes(kind);
+  const hasDrink = ["drink", "diluted_drink"].includes(kind);
+  const hasDilution = kind === "diluted_drink";
+  $$('[data-portion-field="meat"]').forEach((field) => field.classList.toggle("hidden", !hasMeat));
+  $$('[data-portion-field="drink"]').forEach((field) => field.classList.toggle("hidden", !hasDrink));
+  $$('[data-portion-field="dilution"]').forEach((field) => field.classList.toggle("hidden", !hasDilution));
+  if (!applyDefaults) return;
+  if (hasMeat) $("#meatPerPersonField").value = kind === "meat_main" ? 200 : 150;
+  if (hasDrink) $("#servingVolumeField").value = 300;
+  if (hasDilution) {
+    $("#concentratePartsField").value = 3;
+    $("#mixerPartsField").value = 7;
+  }
+}
+
 function openEditor(recipe = null, videoOnly = false) {
   state.editorImage = recipe?.image_url || "";
   $("#recipeId").value = recipe?.id || "";
   $("#editorTitle").textContent = videoOnly ? "動画レシピを登録" : recipe ? "レシピを編集" : "レシピを登録";
   $("#titleField").value = recipe?.title || "";
   $("#servingsField").value = recipe?.servings || 2;
+  $("#portionKindField").value = recipe?.portion_kind || "standard";
+  $("#meatPerPersonField").value = recipe?.meat_g_per_person ?? 200;
+  $("#servingVolumeField").value = recipe?.serving_volume_ml ?? 300;
+  $("#concentratePartsField").value = recipe?.dilution_concentrate_parts ?? 3;
+  $("#mixerPartsField").value = recipe?.dilution_mixer_parts ?? 7;
+  $("#ricePerPersonField").value = recipe?.rice_go_per_person ?? 0;
   $("#tagsField").value = recipe?.tags?.join(", ") || "";
   $("#descriptionField").value = recipe?.description || "";
   $("#ingredientsField").value = recipe?.ingredients?.map((item) => item.amount == null ? `${item.name}${item.note ? `（${item.note}）` : ""}` : `${formatNumber(item.amount)} | ${item.unit} | ${item.name}`).join("\n") || "";
@@ -293,6 +390,7 @@ function openEditor(recipe = null, videoOnly = false) {
   $("#sourceField").value = recipe?.source_url || "";
   $("#videoField").value = recipe?.video_url || "";
   $("#formMessage").textContent = "";
+  updatePortionFields();
   $("#editorDialog").showModal();
   setTimeout(() => (videoOnly ? $("#videoField") : $("#titleField")).focus(), 50);
 }
@@ -303,6 +401,12 @@ async function saveRecipe(event) {
   const payload = {
     title: $("#titleField").value,
     servings: Number($("#servingsField").value),
+    portion_kind: $("#portionKindField").value,
+    meat_g_per_person: Number($("#meatPerPersonField").value),
+    serving_volume_ml: Number($("#servingVolumeField").value),
+    dilution_concentrate_parts: Number($("#concentratePartsField").value),
+    dilution_mixer_parts: Number($("#mixerPartsField").value),
+    rice_go_per_person: Number($("#ricePerPersonField").value),
     tags: $("#tagsField").value.split(",").map((tag) => tag.trim()).filter(Boolean),
     description: $("#descriptionField").value,
     ingredients: $("#ingredientsField").value.split("\n").map((line) => line.trim()).filter(Boolean).map(parseIngredientLine),
@@ -473,7 +577,7 @@ function startCookRecognitionSession() {
   }
 }
 
-async function enableCookVoice() {
+async function enableCookVoice(announce = true) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) { showToast("この端末では音声入力を利用できません"); return; }
   if (!window.isSecureContext) {
@@ -509,6 +613,7 @@ async function enableCookVoice() {
   updateCookVoiceButton();
   startCookRecognitionSession();
   showToast("音声操作をONにしました");
+  if (announce) announceCurrentCookStage();
 }
 
 function disableCookVoice(notify = true) {
@@ -560,6 +665,60 @@ function speak(text) {
   speechSynthesis.speak(utterance);
 }
 
+function pauseCookRecognitionForRemoteSpeech(text) {
+  if (!state.cookVoiceEnabled) return;
+  state.cookVoicePaused = true;
+  clearTimeout(state.cookVoiceRestartTimer);
+  clearTimeout(state.cookVoiceWatchdogTimer);
+  clearTimeout(state.cookVoiceSpeechResumeTimer);
+  state.cookRecognition?.abort();
+  state.cookVoiceSpeechResumeTimer = setTimeout(() => {
+    if (!state.cookVoiceEnabled) return;
+    state.cookVoicePaused = false;
+    scheduleCookRecognition(300);
+  }, Math.max(8_000, Math.min(60_000, text.length * 350 + 5_000)));
+}
+
+function hasPreparationStage() {
+  if (!state.selected) return false;
+  if (state.quantityMode === "guidance") return Boolean(portionGuidance(state.selected).length);
+  return Boolean(state.selected.ingredients?.length);
+}
+
+function preparationItems() {
+  const recipe = state.selected;
+  if (state.quantityMode === "guidance") {
+    return portionGuidance(recipe).map((item) => ({
+      name: item.name,
+      note: "一般的な1人分の適量から計算",
+      amount: item.amount,
+    }));
+  }
+  const canScale = recipe.servings_confirmed !== false;
+  return recipe.ingredients.map((item) => ({
+    name: item.name,
+    note: item.note || "",
+    amount: scaledIngredient(item, recipe.servings, state.servings, canScale),
+  }));
+}
+
+function preparationSpeech() {
+  const items = preparationItems().map((item) => {
+    const note = item.note ? `、${item.note}` : "";
+    return `${item.name}、${item.amount}${note}`;
+  });
+  return `まず、材料を準備します。${items.join("。")}。準備できたら、できました、と言ってください。`;
+}
+
+function announceCurrentCookStage() {
+  if (!state.cookVoiceEnabled || !state.selected) return;
+  if (state.step === -1) {
+    speak(preparationSpeech());
+    return;
+  }
+  sendCookingAction("show", true).catch((error) => showToast(error.message));
+}
+
 async function sendCookingAction(operation, speakRequested = false) {
   if (state.cookingPending) throw new Error("工程操作を送信中です");
   const unresolvedKey = `unresolved-action:${state.selected.id}`;
@@ -575,13 +734,16 @@ async function sendCookingAction(operation, speakRequested = false) {
         request_id: requestId,
         recipe_id: state.selected.id,
         operation,
-        step_number: state.step + 1,
+        step_number: Math.max(1, state.step + 1),
         speak: speakRequested,
       }),
     });
     state.step = result.step_number - 1;
     renderCookStep();
     if (result.speak && result.speech_output === "browser") speak(result.text);
+    if (result.speak && result.speech_output === "home_assistant") {
+      pauseCookRecognitionForRemoteSpeech(result.text);
+    }
     return result;
   } catch (error) {
     if (!error.httpStatus || error.data?.status === "outcome_unknown" || error.data?.status === "pending") {
@@ -596,48 +758,92 @@ async function sendCookingAction(operation, speakRequested = false) {
 async function startCooking() {
   if (!state.selected?.steps.length) { showToast("工程を登録してください"); return; }
   try {
-    state.step = 0;
+    state.step = hasPreparationStage() ? -1 : 0;
     $("#cookMode").classList.remove("hidden");
     document.body.style.overflow = "hidden";
-    enableCookVoice();
-    await sendCookingAction("start");
+    renderCookStep();
+    await enableCookVoice(false);
+    if (state.step === -1) {
+      if (state.cookVoiceEnabled) speak(preparationSpeech());
+    } else {
+      await sendCookingAction("start", state.cookVoiceEnabled);
+    }
   } catch (error) { showToast(error.message); }
 }
 
 function renderCookStep() {
   const recipe = state.selected;
+  const preparing = state.step === -1;
+  const hasPreparation = hasPreparationStage();
+  const totalStages = recipe.steps.length + (hasPreparation ? 1 : 0);
+  const currentStage = state.step + (hasPreparation ? 2 : 1);
   $("#cookTitle").textContent = recipe.title;
-  $("#stepCounter").textContent = `${state.step + 1} / ${recipe.steps.length} 工程`;
-  $("#stepNumber").textContent = state.step + 1;
-  $("#stepText").textContent = recipe.steps[state.step];
-  $("#stepRail").innerHTML = recipe.steps.map((_, index) => `<button class="rail-step ${index === state.step ? "active" : ""}" data-step="${index}">工程 ${index + 1}</button>`).join("");
-  $("#prevStep").disabled = state.step === 0;
-  $("#nextStep").textContent = state.step === recipe.steps.length - 1 ? "できあがり" : "次へ";
+  $("#stepCounter").textContent = `${currentStage} / ${totalStages} ステージ`;
+  $("#stepNumber").classList.toggle("preparation", preparing);
+  $("#stepNumber").textContent = preparing ? "準備" : state.step + 1;
+  $("#stepText").textContent = preparing ? "材料を準備しましょう" : recipe.steps[state.step];
+  $("#preparationList").classList.toggle("hidden", !preparing);
+  $("#preparationList").innerHTML = preparing
+    ? preparationItems().map((item) => `<li><span>${escapeHtml(item.name)}${item.note ? `<small>${escapeHtml(item.note)}</small>` : ""}</span><strong>${escapeHtml(item.amount)}</strong></li>`).join("")
+    : "";
+  const preparationRail = hasPreparation
+    ? `<button class="rail-step ${preparing ? "active" : ""}" data-step="-1">材料準備</button>`
+    : "";
+  $("#stepRail").innerHTML = preparationRail + recipe.steps.map((_, index) => `<button class="rail-step ${index === state.step ? "active" : ""}" data-step="${index}">工程 ${index + 1}</button>`).join("");
+  $("#prevStep").disabled = preparing || (!hasPreparation && state.step === 0);
+  $("#nextStep").textContent = preparing
+    ? "準備できました"
+    : state.step === recipe.steps.length - 1 ? "できあがり" : "できました";
   sessionStorage.setItem(`step:${recipe.id}`, state.step);
 }
 
 async function changeStep(direction) {
+  if (direction > 0 && state.step === -1) {
+    try { await sendCookingAction("start", state.cookVoiceEnabled); }
+    catch (error) { showToast(error.message); }
+    return;
+  }
+  if (direction < 0 && state.step === 0 && hasPreparationStage()) {
+    state.step = -1;
+    renderCookStep();
+    if (state.cookVoiceEnabled) speak(preparationSpeech());
+    return;
+  }
   const last = state.selected.steps.length - 1;
   if (direction > 0 && state.step === last) {
     speak("おつかれさまでした。料理のできあがりです。");
     showToast("できあがり！");
     return;
   }
-  try { await sendCookingAction(direction > 0 ? "next" : "previous"); }
+  try { await sendCookingAction(direction > 0 ? "next" : "previous", state.cookVoiceEnabled); }
+  catch (error) { showToast(error.message); }
+}
+
+async function selectCookStage(step) {
+  if (step === -1 && hasPreparationStage()) {
+    state.step = -1;
+    renderCookStep();
+    if (state.cookVoiceEnabled) speak(preparationSpeech());
+    return;
+  }
+  if (step < 0 || step >= state.selected.steps.length) return;
+  state.step = step;
+  renderCookStep();
+  try { await sendCookingAction("show", state.cookVoiceEnabled); }
   catch (error) { showToast(error.message); }
 }
 
 function handleCookCommand(text) {
   $("#cookCommandInput").value = text;
   showToast(`「${text}」`);
-  if (/次|進んで/.test(text)) changeStep(1);
+  if (/次|進んで|できました|できた|完了/.test(text)) changeStep(1);
   else if (/戻|前/.test(text)) changeStep(-1);
   else if (/読|もう一度|繰り返/.test(text)) sendCookingAction("show", true).catch((error) => showToast(error.message));
   else {
     const match = text.match(/(\d+)\s*分/);
     if (match) startTimer(Number(match[1]));
     else if (/停止|止め/.test(text)) stopTimer();
-    else showToast("「次へ」「戻って」「読み上げ」「5分タイマー」が使えます");
+    else showToast("「できました」「戻って」「読み上げ」「5分タイマー」が使えます");
   }
 }
 
@@ -711,7 +917,11 @@ document.addEventListener("click", (event) => {
   }
   if (target.dataset.query != null) { $("#searchInput").value = target.dataset.query; loadRecipes(target.dataset.query); }
   if (target.dataset.serving) { state.servings = adjustServings(state.servings, Number(target.dataset.serving)); renderDetail(); }
-  if (target.dataset.step != null) { state.step = Number(target.dataset.step); renderCookStep(); }
+  if (target.dataset.quantityMode) {
+    state.quantityMode = target.dataset.quantityMode;
+    renderDetail();
+  }
+  if (target.dataset.step != null) selectCookStage(Number(target.dataset.step));
   if (target.dataset.minutes) startTimer(Number(target.dataset.minutes));
   if (target.dataset.mode) {
     setMode(target.dataset.mode);
@@ -756,6 +966,7 @@ $("#cookCommandForm").addEventListener("submit", (event) => {
   handleCookCommand(command);
 });
 $("#recipeForm").addEventListener("submit", saveRecipe);
+$("#portionKindField").addEventListener("change", () => updatePortionFields(true));
 $("#importForm").addEventListener("submit", importFromUrl);
 $("#videoImportForm").addEventListener("submit", importFromVideo);
 $("#prevStep").addEventListener("click", () => changeStep(-1));

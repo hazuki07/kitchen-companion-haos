@@ -128,6 +128,12 @@
         <label class="wide">料理名<input id="titleField" required maxlength="160" placeholder="例：トマトと卵の炒めもの"></label>
         <label>基準の人数<input id="servingsField" type="number" min="0.5" max="100" step="0.5" value="2" required></label>
         <label>タグ<input id="tagsField" placeholder="中華, 20分, 卵"></label>
+        <label>1人分の適量タイプ <small>レシピ記載量とは別に保存します</small><select id="portionKindField"><option value="standard">適量ガイドなし</option><option value="meat_main">肉が主役（200g／人）</option><option value="mixed_meat">肉入り料理（150g／人）</option><option value="drink">ドリンク（300ml／人）</option><option value="diluted_drink">希釈ドリンク（3:7）</option></select></label>
+        <label data-portion-field="meat">肉の適量（g／人）<input id="meatPerPersonField" type="number" min="0" max="1000" step="5" value="200"></label>
+        <label data-portion-field="drink">完成量の適量（ml／人）<input id="servingVolumeField" type="number" min="50" max="2000" step="10" value="300"></label>
+        <label data-portion-field="dilution">濃縮液の比率<input id="concentratePartsField" type="number" min="0.1" max="100" step="0.1" value="3"></label>
+        <label data-portion-field="dilution">水・炭酸水の比率<input id="mixerPartsField" type="number" min="0.1" max="100" step="0.1" value="7"></label>
+        <label>ご飯の適量（合／人）<input id="ricePerPersonField" type="number" min="0" max="5" step="0.125" value="0" placeholder="例：0.375（不要なら0）"></label>
         <label class="wide">ひとこと<textarea id="descriptionField" rows="2" placeholder="味や作り方のメモ"></textarea></label>
         <label class="wide">材料 <small>1行に「量 | 単位 | 材料名」。量を省く場合は「材料名」だけでもOK</small><textarea id="ingredientsField" rows="7" placeholder="300 | g | 鶏もも肉&#10;1 | 個 | 玉ねぎ&#10;塩・こしょう（適量）"></textarea></label>
         <label class="wide">工程 <small>1行を1工程として登録します</small><textarea id="stepsField" rows="8" placeholder="材料を切ります。&#10;フライパンを中火で熱します。"></textarea></label>
@@ -151,10 +157,11 @@
         <p class="eyebrow">CURRENT STEP</p>
         <div class="step-number" id="stepNumber"></div>
         <p id="stepText"></p>
+        <ul class="cook-preparation hidden" id="preparationList"></ul>
         <form class="cook-command" id="cookCommandForm">
           <label class="sr-only" for="cookCommandInput">調理コマンド</label>
           <input id="cookCommandInput" type="text" enterkeyhint="send" placeholder="認識したコマンドをここに表示します">
-          <div class="command-hints" aria-label="使用できる音声コマンド"><span>次へ</span><span>戻って</span><span>読み上げ</span><span>5分タイマー</span><span>停止</span></div>
+          <div class="command-hints" aria-label="使用できる音声コマンド"><span>できました</span><span>戻って</span><span>読み上げ</span><span>5分タイマー</span><span>停止</span></div>
         </form>
         <div class="timer-panel">
           <div><span>タイマー</span><strong id="timerDisplay">00:00</strong></div>
