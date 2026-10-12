@@ -135,7 +135,31 @@ class RecipeTests(unittest.TestCase):
     def test_fraction_ingredient(self) -> None:
         parsed = parse_ingredient("1/2 個 玉ねぎ")
         self.assertEqual(parsed["amount"], 0.5)
+        self.assertEqual(parsed["amount_text"], "1/2")
         self.assertEqual(parsed["name"], "玉ねぎ")
+        self.assertEqual(parsed["original_text"], "1/2 個 玉ねぎ")
+
+    def test_validation_preserves_ingredient_source_text(self) -> None:
+        recipe = validate_recipe(
+            {
+                "title": "架空の料理",
+                "servings": 2,
+                "ingredients": [
+                    {
+                        "amount": 0.5,
+                        "amount_text": "1/2",
+                        "unit": "個",
+                        "name": "架空野菜",
+                        "original_text": "架空野菜 1/2個",
+                    }
+                ],
+                "steps": [],
+            }
+        )
+        ingredient = recipe["ingredients"][0]
+        self.assertEqual(ingredient["amount"], 0.5)
+        self.assertEqual(ingredient["amount_text"], "1/2")
+        self.assertEqual(ingredient["original_text"], "架空野菜 1/2個")
 
     def test_video_timestamp_accepts_clock_formats(self) -> None:
         self.assertEqual(parse_video_timestamp("01:30"), 90)
@@ -353,6 +377,9 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(recipes[0]["step_video_timestamps"], [12])
         self.assertEqual(recipes[0]["ingredients"][0]["note"], "架空の香辛料 適量")
         self.assertEqual(
+            recipes[0]["ingredients"][0]["original_text"], "架空の香辛料 適量"
+        )
+        self.assertEqual(
             recipes[0]["image_url"],
             "api/catalog/images/11111111-1111-1111-1111-111111111111",
         )
@@ -372,7 +399,14 @@ class RecipeTests(unittest.TestCase):
             "meat_g_per_person": 200,
             "rice_go_per_person": 0.375,
             "step_video_timestamps": [20],
-            "ingredients": [{"amount": 100, "unit": "g", "name": "架空豆", "note": ""}],
+            "ingredients": [{
+                "amount": 100,
+                "amount_text": "100",
+                "unit": "g",
+                "name": "架空豆",
+                "note": "",
+                "original_text": "架空豆 100g",
+            }],
             "steps": ["架空の鍋で煮る。"],
             "tags": ["架空"],
         }
@@ -387,6 +421,10 @@ class RecipeTests(unittest.TestCase):
             transport.calls[1]["body"]["extras"]["step_video_timestamps"], "[20]"
         )
         self.assertEqual(transport.calls[1]["body"]["recipeIngredient"][0]["food"], "架空豆")
+        self.assertEqual(
+            transport.calls[1]["body"]["recipeIngredient"][0]["originalText"],
+            "架空豆 100g",
+        )
         self.assertEqual(transport.calls[1]["body"]["tags"], [{"name": "架空"}])
 
     def test_mealie_sync_record_prevents_automatic_retry(self) -> None:

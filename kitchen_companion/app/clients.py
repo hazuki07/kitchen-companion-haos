@@ -174,7 +174,14 @@ def _timestamp_list(value: Any, length: int) -> list[int | None]:
 
 def _ingredient(raw: Any) -> dict[str, Any] | None:
     if isinstance(raw, str):
-        return {"amount": None, "unit": "", "name": raw[:200], "note": "未確認"}
+        return {
+            "amount": None,
+            "amount_text": "",
+            "unit": "",
+            "name": raw[:200],
+            "note": "未確認",
+            "original_text": raw[:500],
+        }
     if not isinstance(raw, dict):
         return None
     food = raw.get("food") if isinstance(raw.get("food"), dict) else {}
@@ -182,14 +189,17 @@ def _ingredient(raw: Any) -> dict[str, Any] | None:
     display = str(raw.get("display") or raw.get("originalText") or "").strip()
     name = str(food.get("name") or raw.get("note") or display or "材料名未確認").strip()
     amount = _number(raw.get("quantity"))
+    amount_text = str(raw.get("quantity") if raw.get("quantity") is not None else "").strip()
     note = str(raw.get("note") or "").strip()
     if amount is None and not note:
         note = display or "未確認"
     return {
         "amount": amount,
+        "amount_text": amount_text[:50],
         "unit": str(unit.get("abbreviation") or unit.get("name") or "")[:30],
         "name": name[:200],
         "note": note[:200],
+        "original_text": (display or name)[:500],
     }
 
 
@@ -349,6 +359,7 @@ class MealieSyncClient:
             unit = str(item.get("unit") or "").strip()
             name = str(item.get("name") or "").strip()
             note = str(item.get("note") or "").strip()
+            original_text = str(item.get("original_text") or "").strip()
             display = " ".join(
                 part
                 for part in (
@@ -365,7 +376,7 @@ class MealieSyncClient:
                     "unit": unit or None,
                     "food": name or None,
                     "note": note,
-                    "originalText": display,
+                    "originalText": original_text or display,
                 }
             )
         body: dict[str, Any] = {

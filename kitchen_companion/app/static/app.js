@@ -366,10 +366,21 @@ function goHome() {
 function parseIngredientLine(line) {
   const parts = line.split("|").map((part) => part.trim());
   if (parts.length >= 3) {
-    const amount = Number(parts[0]);
-    return { amount: Number.isFinite(amount) ? amount : null, unit: parts[1], name: parts.slice(2).join(" | "), note: "" };
+    const amountText = parts[0];
+    const fraction = amountText.match(/^(\d+)\s*\/\s*(\d+)$/);
+    const amount = fraction && Number(fraction[2]) !== 0
+      ? Number(fraction[1]) / Number(fraction[2])
+      : Number(amountText);
+    return {
+      amount: Number.isFinite(amount) ? amount : null,
+      amount_text: amountText,
+      unit: parts[1],
+      name: parts.slice(2).join(" | "),
+      note: "",
+      original_text: line,
+    };
   }
-  return { amount: null, unit: "", name: line.trim(), note: "" };
+  return { amount: null, amount_text: "", unit: "", name: line.trim(), note: "", original_text: line };
 }
 
 function updatePortionFields(applyDefaults = false) {
@@ -403,7 +414,10 @@ function openEditor(recipe = null, videoOnly = false) {
   $("#ricePerPersonField").value = recipe?.rice_go_per_person ?? 0;
   $("#tagsField").value = recipe?.tags?.join(", ") || "";
   $("#descriptionField").value = recipe?.description || "";
-  $("#ingredientsField").value = recipe?.ingredients?.map((item) => item.amount == null ? `${item.name}${item.note ? `（${item.note}）` : ""}` : `${formatNumber(item.amount)} | ${item.unit} | ${item.name}`).join("\n") || "";
+  $("#ingredientsField").value = recipe?.ingredients?.map((item) => item.amount == null
+    ? (item.original_text || `${item.name}${item.note ? `（${item.note}）` : ""}`)
+    : `${item.amount_text || formatNumber(item.amount)} | ${item.unit} | ${item.name}`
+  ).join("\n") || "";
   $("#stepsField").value = recipe?.steps?.join("\n") || "";
   $("#stepTimestampsField").value = recipe?.steps?.map((_, index) => (
     formatVideoTimestamp(recipe?.step_video_timestamps?.[index])
