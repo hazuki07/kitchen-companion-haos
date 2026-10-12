@@ -281,6 +281,83 @@ class MealieReadClient:
         }
 
 
+class MealieSyncClient:
+    """Explicitly publish local recipes to Mealie.
+
+    Creation and update are separate so the caller can persist the returned slug
+    before sending the recipe body. This prevents an uncertain PATCH result from
+    causing a second recipe to be created automatically.
+    """
+
+    def __init__(self, transport: JsonTransport):
+        self.transport = transport
+
+    def create(self, recipe: dict[str, Any]) -> str:
+        response = self.transport.request(
+            "POST",
+            "/api/recipes",
+            body={"name": str(recipe.get("title") or "料理名未確認")[:160]},
+        )
+        slug = (
+            response
+            if isinstance(response, str)
+            else response.get("slug") if isinstance(response, dict) else ""
+        )
+        if not isinstance(slug, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", slug):
+            raise IntegrationError("Mealieの作成応答が正しくありません")
+        return slug
+
+    def update(self, slug: str, recipe: dict[str, Any]) -> None:
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", slug):
+            raise ValueError("Mealie recipe slugが正しくありません")
+        ingredients = []
+        for item in recipe.get("ingredients", []):
+            amount = item.get("amount")
+            unit = str(item.get("unit") or "").strip()
+            name = str(item.get("name") or "").strip()
+            note = str(item.get("note") or "").strip()
+            display = " ".join(
+                part
+                for part in (
+                    f"{amount:g}" if isinstance(amount, (int, float)) else "",
+                    unit,
+                    name,
+                    note,
+                )
+                if part
+            )
+            ingredients.append(
+                {
+                    "quantity": amount,
+                    "unit": unit or None,
+                    "food": name or None,
+                    "note": note,
+                    "originalText": display,
+                }
+            )
+        body: dict[str, Any] = {
+            "name": str(recipe.get("title") or "料理名未確認")[:160],
+            "description": str(recipe.get("description") or "")[:2000],
+            "recipeServings": recipe.get("servings"),
+            "recipeYieldQuantity": recipe.get("servings"),
+            "recipeYield": "人分",
+            "orgURL": str(recipe.get("source_url") or ""),
+            "recipeIngredient": ingredients,
+            "recipeInstructions": [
+                {"text": str(step)[:2000]} for step in recipe.get("steps", []) if str(step).strip()
+            ],
+            "tags": [
+                {"name": str(tag)[:50]} for tag in recipe.get("tags", []) if str(tag).strip()
+            ],
+            "extras": {"video_url": str(recipe.get("video_url") or "")},
+        }
+        self.transport.request(
+            "PATCH",
+            f"/api/recipes/{quote(slug, safe='')}",
+            body=body,
+        )
+
+
 class MealieImageClient:
     ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
     MAX_IMAGE_BYTES = 8_000_000

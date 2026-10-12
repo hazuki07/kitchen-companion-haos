@@ -49,11 +49,13 @@ class RuntimeConfig:
             }
         return {
             "mode": self.mode,
-            "label": "Home Assistant（Mealie読取専用）",
+            "label": "Home Assistant（Mealie手動同期）",
             "home_assistant": "script_action",
-            "mealie": "read_only",
+            "mealie": "manual_sync",
+            "mealie_sync_enabled": True,
             "speech": "home_assistant",
             "external_write_enabled": True,
+            "external_write_scope": "home_assistant_and_mealie_manual",
         }
 
 

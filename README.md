@@ -30,13 +30,16 @@ AndroidタブレットとHome Assistant OSで使う、個人向けの料理ア�
 - SQLiteへローカル下書きを保存
 - Stage専用の読み取り専用Mealieモックを検索・表示
 - Mealie画像を認証情報をブラウザへ渡さず同一オリジンで中継
+- 確認済みのローカル下書きを、レシピ詳細のボタンからMealieへ明示的に同期
 - 「調理アシスト」と「レシピ取り込み」を分離し、Mealie・Web URL・動画URLを出典別に選択
 - Mealieまたはレシピページに動画URLがある場合は、レシピ詳細から動画を開ける形で保持
 - 動画ページの公開メタデータからタイトル・説明・サムネイルを自動入力し、Recipe構造化データまたは説明欄に明記された材料・工程も反映
 - 工程操作の一意request IDと永続状態による二重実行防止
 
 外部ページから取り込んだ内容は、必ず保存前に確認してください。出典URLはレシピに残ります。
-Mealieへの確認後保存、既存HA工程スクリプトとの接続、Echo読み上げは次の統合段階です。
+Mealie同期は自動では行わず、レシピ詳細の「Mealieへ同期」を押した時だけ作成・更新します。
+同期済みレシピはMealie側を正として一覧へ表示し、削除はMealieへ伝播しません。通信結果が不明な場合は
+重複作成を避けるため自動再送せず、Mealie側で結果を確認する表示へ切り替わります。
 Mealieから取得した基準人数や材料の量が空欄の場合は推測せず、`未確認`として表示し、人数換算を無効にします。
 
 ## 開発環境で試す
@@ -66,6 +69,7 @@ Home Assistant Appとして動かす場合、HA認証は公式のSupervisorプ�
 
 MealieのURLとtoken、呼び出す料理工程scriptのentity IDは、Git管理外のApp設定ディレクトリにある
 `integrations.json`から読み取ります。形式は`kitchen_companion/integrations.example.json`を参照してください。
+同期を利用するtokenには、対象Mealieグループでレシピの作成・更新ができる権限が必要です。
 Alexaタイマーは同じ設定の`timer_script_entity_id`へ`operation`と`minutes`を渡します。実際のAlexa
 通知先はHome Assistant側の専用scriptだけに固定し、AppやGit管理文書へ実entity IDを記録しません。
 Appにはこのディレクトリが読み取り専用でmountされます。tokenをリポジトリ、README、画面、ログへ

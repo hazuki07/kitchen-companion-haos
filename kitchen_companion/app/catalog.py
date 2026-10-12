@@ -54,7 +54,17 @@ class CombinedRecipeCatalog:
         self.drafts = drafts
 
     def list(self, query: str = "") -> list[dict[str, Any]]:
-        return [*self.primary.list(query), *self.drafts.list(query)]
+        primary = self.primary.list(query)
+        primary_ids = {str(recipe.get("id")) for recipe in primary}
+        drafts = [
+            recipe
+            for recipe in self.drafts.list(query)
+            if not (
+                recipe.get("mealie_sync_status") == "synced"
+                and str(recipe.get("mealie_slug")) in primary_ids
+            )
+        ]
+        return [*primary, *drafts]
 
     def get(self, recipe_id: str) -> dict[str, Any] | None:
         return self.primary.get(recipe_id) or self.drafts.get(recipe_id)

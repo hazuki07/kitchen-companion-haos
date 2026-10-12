@@ -28,6 +28,7 @@ from .clients import (
     IntegrationError,
     MealieImageClient,
     MealieReadClient,
+    MealieSyncClient,
     UrllibJsonTransport,
 )
 from .integrations import RuntimeConfig, StageCookingController, StageTimerController
@@ -85,6 +86,15 @@ class RecipeStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS mealie_sync_records (
+                    local_recipe_id TEXT PRIMARY KEY,
+                    recipe_fingerprint TEXT NOT NULL,
+                    mealie_slug TEXT,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'synced', 'outcome_unknown')),
+                    response_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             count = db.execute("SELECT COUNT(*) FROM recipes").fetchone()[0]
@@ -128,18 +138,41 @@ class RecipeStore:
             if query:
                 token = f"%{query.strip()}%"
                 rows = db.execute(
-                    """SELECT * FROM recipes
-                       WHERE title LIKE ? OR description LIKE ? OR tags_json LIKE ?
-                       ORDER BY updated_at DESC""",
+                    """SELECT recipes.*,
+                              mealie_sync_records.status AS mealie_sync_status,
+                              mealie_sync_records.mealie_slug AS mealie_slug
+                       FROM recipes
+                       LEFT JOIN mealie_sync_records
+                         ON mealie_sync_records.local_recipe_id = recipes.id
+                       WHERE recipes.title LIKE ? OR recipes.description LIKE ?
+                          OR recipes.tags_json LIKE ?
+                       ORDER BY recipes.updated_at DESC""",
                     (token, token, token),
                 ).fetchall()
             else:
-                rows = db.execute("SELECT * FROM recipes ORDER BY updated_at DESC").fetchall()
+                rows = db.execute(
+                    """SELECT recipes.*,
+                              mealie_sync_records.status AS mealie_sync_status,
+                              mealie_sync_records.mealie_slug AS mealie_slug
+                       FROM recipes
+                       LEFT JOIN mealie_sync_records
+                         ON mealie_sync_records.local_recipe_id = recipes.id
+                       ORDER BY recipes.updated_at DESC"""
+                ).fetchall()
         return [self._row(row) for row in rows]
 
     def get(self, recipe_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
-            row = db.execute("SELECT * FROM recipes WHERE id = ?", (recipe_id,)).fetchone()
+            row = db.execute(
+                """SELECT recipes.*,
+                          mealie_sync_records.status AS mealie_sync_status,
+                          mealie_sync_records.mealie_slug AS mealie_slug
+                   FROM recipes
+                   LEFT JOIN mealie_sync_records
+                     ON mealie_sync_records.local_recipe_id = recipes.id
+                   WHERE recipes.id = ?""",
+                (recipe_id,),
+            ).fetchone()
         return self._row(row) if row else None
 
     def save(self, raw: dict[str, Any], recipe_id: str | None = None) -> dict[str, Any]:
@@ -180,8 +213,64 @@ class RecipeStore:
 
     def delete(self, recipe_id: str) -> bool:
         with self.connect() as db:
+            db.execute("DELETE FROM mealie_sync_records WHERE local_recipe_id = ?", (recipe_id,))
             cursor = db.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
         return cursor.rowcount > 0
+
+    def begin_mealie_sync(
+        self, recipe_id: str, fingerprint: str
+    ) -> tuple[str, str | None, dict[str, Any] | None]:
+        now = utc_now()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT recipe_fingerprint, mealie_slug, status, response_json "
+                "FROM mealie_sync_records WHERE local_recipe_id = ?",
+                (recipe_id,),
+            ).fetchone()
+            if row:
+                response = json.loads(row["response_json"]) if row["response_json"] else None
+                if row["status"] == "synced" and row["recipe_fingerprint"] == fingerprint:
+                    return "synced", row["mealie_slug"], response
+                if row["status"] in {"pending", "outcome_unknown"}:
+                    return str(row["status"]), row["mealie_slug"], response
+                db.execute(
+                    "UPDATE mealie_sync_records SET recipe_fingerprint = ?, status = 'pending', "
+                    "response_json = NULL, updated_at = ? WHERE local_recipe_id = ?",
+                    (fingerprint, now, recipe_id),
+                )
+                return "update", row["mealie_slug"], None
+            db.execute(
+                "INSERT INTO mealie_sync_records "
+                "(local_recipe_id, recipe_fingerprint, status, created_at, updated_at) "
+                "VALUES (?, ?, 'pending', ?, ?)",
+                (recipe_id, fingerprint, now, now),
+            )
+        return "create", None, None
+
+    def set_mealie_slug(self, recipe_id: str, slug: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE mealie_sync_records SET mealie_slug = ?, updated_at = ? "
+                "WHERE local_recipe_id = ? AND status = 'pending'",
+                (slug, utc_now(), recipe_id),
+            )
+
+    def finish_mealie_sync(self, recipe_id: str, response: dict[str, Any]) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE mealie_sync_records SET status = 'synced', response_json = ?, updated_at = ? "
+                "WHERE local_recipe_id = ?",
+                (json.dumps(response, ensure_ascii=False), utc_now(), recipe_id),
+            )
+
+    def mark_mealie_sync_unknown(self, recipe_id: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE mealie_sync_records SET status = 'outcome_unknown', updated_at = ? "
+                "WHERE local_recipe_id = ?",
+                (utc_now(), recipe_id),
+            )
 
     def begin_action(self, request_id: str, fingerprint: str) -> tuple[str, dict[str, Any] | None]:
         now = utc_now()
@@ -638,6 +727,7 @@ class AppHandler(BaseHTTPRequestHandler):
     cooking: StageCookingController | HomeAssistantCookingClient
     timer: StageTimerController | HomeAssistantTimerClient
     images: MealieImageClient | None
+    mealie_sync: MealieSyncClient | None
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"{self.address_string()} - {fmt % args}")
@@ -742,6 +832,63 @@ class AppHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/import/video":
                 data = self.body()
                 self.json_response(import_video(str(data.get("url", ""))))
+            elif self.path == "/api/mealie/sync":
+                if not self.mealie_sync:
+                    self.json_response({"error": "Mealie同期はHome Assistant環境で利用できます"}, 409)
+                    return
+                data = self.body()
+                recipe_id = str(data.get("recipe_id") or "")
+                recipe = self.store.get(recipe_id)
+                if not recipe:
+                    self.json_response({"error": "同期する下書きが見つかりません"}, 404)
+                    return
+                fingerprint = hashlib.sha256(
+                    json.dumps(
+                        {key: recipe.get(key) for key in (
+                            "title", "description", "servings", "source_url", "video_url",
+                            "ingredients", "steps", "tags",
+                        )},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                sync_state, slug, previous = self.store.begin_mealie_sync(recipe_id, fingerprint)
+                if sync_state == "synced":
+                    self.json_response({**(previous or {}), "replayed": True})
+                    return
+                if sync_state in {"pending", "outcome_unknown"}:
+                    self.json_response(
+                        {
+                            "error": "前回の同期結果をMealie側で確認してください",
+                            "status": sync_state,
+                            "mealie_slug": slug,
+                        },
+                        409,
+                    )
+                    return
+                try:
+                    if not slug:
+                        slug = self.mealie_sync.create(recipe)
+                        self.store.set_mealie_slug(recipe_id, slug)
+                    self.mealie_sync.update(slug, recipe)
+                except Exception:
+                    self.store.mark_mealie_sync_unknown(recipe_id)
+                    self.json_response(
+                        {
+                            "error": (
+                                "同期結果を確認できないため自動再送を停止しました。"
+                                "Mealie側を確認してください"
+                            ),
+                            "status": "outcome_unknown",
+                            "mealie_slug": slug,
+                        },
+                        502,
+                    )
+                    return
+                result = {"status": "synced", "mealie_slug": slug}
+                self.store.finish_mealie_sync(recipe_id, result)
+                self.json_response(result)
             elif self.path == "/api/timer/action":
                 data = self.body()
                 request_id = str(data.get("request_id", ""))
@@ -929,10 +1076,13 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
         else:
             timer = StageTimerController()
         images = None
+        mealie_sync = None
     else:
         config_path = Path(os.environ.get("COOKING_ASSISTANT_EXTERNAL_CONFIG", "/config/integrations.json"))
         external = ExternalIntegrationConfig.load(config_path)
-        recipe_reader = MealieReadClient(UrllibJsonTransport(external.mealie_url, external.mealie_token))
+        mealie_transport = UrllibJsonTransport(external.mealie_url, external.mealie_token)
+        recipe_reader = MealieReadClient(mealie_transport)
+        mealie_sync = MealieSyncClient(mealie_transport)
         cooking = HomeAssistantCookingClient(
             UrllibJsonTransport(external.home_assistant_url, os.environ.get("SUPERVISOR_TOKEN", "")),
             external.script_entity_id,
@@ -955,6 +1105,7 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
             "cooking": cooking,
             "timer": timer,
             "images": images,
+            "mealie_sync": mealie_sync,
         },
     )
     return ThreadingHTTPServer((host, port), handler)

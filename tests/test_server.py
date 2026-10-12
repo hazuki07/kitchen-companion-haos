@@ -19,6 +19,7 @@ from app.clients import (  # noqa: E402
     IntegrationError,
     MealieImageClient,
     MealieReadClient,
+    MealieSyncClient,
 )
 from app.integrations import (  # noqa: E402
     RuntimeConfig,
@@ -239,6 +240,27 @@ class RecipeTests(unittest.TestCase):
             catalog = CombinedRecipeCatalog(MockMealieCatalog(fixture), drafts)
             self.assertTrue(any(recipe["source_kind"] == "draft" for recipe in catalog.list()))
 
+    def test_combined_catalog_hides_synced_draft_when_mealie_has_it(self) -> None:
+        class Catalog:
+            def list(self, query: str = "") -> list[dict[str, Any]]:
+                return [{"id": "fictional-soup", "title": "Mealie側"}]
+
+            def get(self, recipe_id: str) -> dict[str, Any] | None:
+                return None
+
+        class Drafts(Catalog):
+            def list(self, query: str = "") -> list[dict[str, Any]]:
+                return [{
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "title": "下書き",
+                    "mealie_sync_status": "synced",
+                    "mealie_slug": "fictional-soup",
+                }]
+
+        self.assertEqual(CombinedRecipeCatalog(Catalog(), Drafts()).list(), [
+            {"id": "fictional-soup", "title": "Mealie側"}
+        ])
+
     def test_mealie_client_uses_read_only_endpoints_and_maps_unknowns(self) -> None:
         transport = RecordingTransport(
             [
@@ -267,6 +289,38 @@ class RecipeTests(unittest.TestCase):
         )
         self.assertEqual([call["method"] for call in transport.calls], ["GET", "GET"])
         self.assertEqual(transport.calls[0]["query"]["search"], "スープ")
+
+    def test_mealie_sync_client_creates_then_patches_recipe(self) -> None:
+        transport = RecordingTransport(["fictional-soup", {"slug": "fictional-soup"}])
+        client = MealieSyncClient(transport)
+        recipe = {
+            "title": "架空スープ",
+            "description": "架空の説明",
+            "servings": 2,
+            "source_url": "https://recipes.example.invalid/fictional",
+            "video_url": "https://video.example.invalid/watch/1",
+            "ingredients": [{"amount": 100, "unit": "g", "name": "架空豆", "note": ""}],
+            "steps": ["架空の鍋で煮る。"],
+            "tags": ["架空"],
+        }
+        slug = client.create(recipe)
+        client.update(slug, recipe)
+        self.assertEqual([call["method"] for call in transport.calls], ["POST", "PATCH"])
+        self.assertEqual(transport.calls[0]["body"], {"name": "架空スープ"})
+        self.assertEqual(transport.calls[1]["body"]["extras"]["video_url"], recipe["video_url"])
+        self.assertEqual(transport.calls[1]["body"]["recipeIngredient"][0]["food"], "架空豆")
+        self.assertEqual(transport.calls[1]["body"]["tags"], [{"name": "架空"}])
+
+    def test_mealie_sync_record_prevents_automatic_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            recipe_id = store.list()[0]["id"]
+            self.assertEqual(store.begin_mealie_sync(recipe_id, "fingerprint")[0], "create")
+            store.set_mealie_slug(recipe_id, "fictional-soup")
+            store.mark_mealie_sync_unknown(recipe_id)
+            state, slug, _ = store.begin_mealie_sync(recipe_id, "fingerprint")
+            self.assertEqual(state, "outcome_unknown")
+            self.assertEqual(slug, "fictional-soup")
 
     def test_home_assistant_client_calls_only_configured_script(self) -> None:
         transport = RecordingTransport([[]])

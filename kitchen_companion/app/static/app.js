@@ -177,19 +177,45 @@ function renderDetail() {
   const source = safeUrl(recipe.source_url);
   const video = safeUrl(recipe.video_url);
   const servingsConfirmed = recipe.servings_confirmed !== false;
+  const syncButton = !recipe.read_only && state.runtime?.mealie_sync_enabled
+    ? recipe.mealie_sync_status === "synced"
+      ? '<button class="secondary-button" disabled>Mealie同期済み</button>'
+      : recipe.mealie_sync_status === "outcome_unknown"
+        ? '<button class="secondary-button" disabled>Mealieで確認</button>'
+        : '<button class="secondary-button" data-action="sync-mealie">Mealieへ同期</button>'
+    : "";
   $("#detailView").innerHTML = `
     <button class="back-button" data-action="home">← レシピ一覧</button>
     <div class="detail-hero">
       <div class="detail-image">${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(recipe.title)}">` : ""}</div>
       <div class="detail-copy"><p class="eyebrow">READY TO COOK</p><h1>${escapeHtml(recipe.title)}</h1><p>${escapeHtml(recipe.description)}</p>
         <div class="serving-control">${servingsConfirmed ? `<button data-serving="-1" aria-label="人数を減らす">−</button><strong>${formatServings(state.servings)}人分</strong><button data-serving="1" aria-label="人数を増やす">＋</button>` : "<strong>人数・換算は未確認</strong>"}</div>
-        <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button><button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button></div>
+        <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button><button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button>${syncButton}</div>
       </div>
     </div>
     <div class="recipe-columns"><section><p class="eyebrow">INGREDIENTS</p><h2>材料</h2><ul class="ingredient-list">
       ${recipe.ingredients.map((item) => `<li><span>${escapeHtml(item.name)}${item.note ? `<small> ${escapeHtml(item.note)}</small>` : ""}</span><strong>${escapeHtml(scaledIngredient(item, recipe.servings, state.servings, servingsConfirmed))}</strong></li>`).join("")}
       </ul>${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">出典ページを開く</a>` : ""}${video ? `<br><a class="source-link" href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">動画を開く</a>` : ""}</section>
       <section><p class="eyebrow">DIRECTIONS</p><h2>作り方</h2><ol class="steps-list">${recipe.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section></div>`;
+}
+
+async function syncCurrentRecipe(button) {
+  if (!state.selected || state.selected.read_only) return;
+  button.disabled = true;
+  button.textContent = "Mealieへ同期中…";
+  try {
+    await api("/api/mealie/sync", {
+      method: "POST",
+      body: JSON.stringify({ recipe_id: state.selected.id }),
+    });
+    showToast("Mealieへ同期しました");
+    await loadRecipes();
+    goHome();
+  } catch (error) {
+    state.selected.mealie_sync_status = error.data?.status || "";
+    renderDetail();
+    showToast(error.message);
+  }
 }
 
 function goHome() {
@@ -650,6 +676,7 @@ document.addEventListener("click", (event) => {
     "open-editor": () => openEditor(null, target.dataset.kind === "video"),
     "close-editor": () => $("#editorDialog").close(),
     "edit-current": () => openEditor(state.selected.read_only ? { ...state.selected, id: "" } : state.selected),
+    "sync-mealie": () => syncCurrentRecipe(target),
     "start-cooking": startCooking,
     "stop-cooking": () => { disableCookVoice(false); $("#cookMode").classList.add("hidden"); document.body.style.overflow = ""; window.speechSynthesis?.cancel(); },
     "timer-stop": () => stopTimer(),
