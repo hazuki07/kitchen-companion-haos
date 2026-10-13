@@ -489,6 +489,59 @@ class RecipeTests(unittest.TestCase):
         self.assertIsNone(recipe["ingredients"][4]["amount"])
         self.assertEqual(recipe["ingredients"][4]["note"], "適量")
 
+    def test_mealie_client_normalizes_colon_ingredients(self) -> None:
+        raw_ingredients = [
+            "架空ひき肉（配合7:3）:250g",
+            "架空塩0.8%-1%:2g",
+            "架空ナツメグ:小さじ1/2",
+            "架空こしょう:多めの少々",
+            "架空卵:1個",
+            "架空パン粉:大さじ1",
+        ]
+        transport = RecordingTransport(
+            [{
+                "slug": "fictional-hamburg",
+                "name": "架空ハンバーグ",
+                "recipeServings": 2,
+                "recipeIngredient": [
+                    {
+                        "quantity": 0,
+                        "food": {"name": text},
+                        "note": text,
+                        "display": text,
+                    }
+                    for text in raw_ingredients
+                ],
+                "recipeInstructions": [],
+            }]
+        )
+
+        recipe = MealieReadClient(transport).get("fictional-hamburg")
+
+        self.assertIsNotNone(recipe)
+        assert recipe is not None
+        ingredients = recipe["ingredients"]
+        self.assertEqual(
+            [item["name"] for item in ingredients],
+            [
+                "架空ひき肉（配合7:3）",
+                "架空塩0.8%-1%",
+                "架空ナツメグ",
+                "架空こしょう",
+                "架空卵",
+                "架空パン粉",
+            ],
+        )
+        self.assertEqual((ingredients[0]["amount"], ingredients[0]["unit"]), (250, "g"))
+        self.assertEqual((ingredients[1]["amount"], ingredients[1]["unit"]), (2, "g"))
+        self.assertEqual(ingredients[2]["amount"], 0.5)
+        self.assertEqual(ingredients[2]["amount_text"], "1/2")
+        self.assertEqual(ingredients[2]["unit"], "小さじ")
+        self.assertIsNone(ingredients[3]["amount"])
+        self.assertEqual(ingredients[3]["note"], "多めの少々")
+        self.assertEqual((ingredients[4]["amount"], ingredients[4]["unit"]), (1, "個"))
+        self.assertEqual((ingredients[5]["amount"], ingredients[5]["unit"]), (1, "大さじ"))
+
     def test_mealie_sync_client_creates_then_patches_recipe(self) -> None:
         transport = RecordingTransport(["fictional-soup", {"slug": "fictional-soup"}])
         client = MealieSyncClient(transport)
