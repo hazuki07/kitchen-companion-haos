@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import hmac
 import ipaddress
 import json
 import mimetypes
@@ -39,6 +40,7 @@ MOCK_MEALIE_FIXTURE = APP_DIR / "fixtures" / "mock_mealie.json"
 DEFAULT_DB = Path(os.environ.get("COOKING_ASSISTANT_DB", "/data/recipes.sqlite3"))
 MAX_BODY = 1_000_000
 MAX_IMPORT = 3_000_000
+MAX_REVIEW_BUNDLE = 20
 
 
 def utc_now() -> str:
@@ -669,6 +671,161 @@ def ingredient_amounts_match(local: dict[str, Any], remote: dict[str, Any]) -> b
     return semantic(local) == semantic(remote)
 
 
+def canonical_recipe_source(recipe: dict[str, Any]) -> str:
+    for key in ("video_url", "source_url"):
+        raw_url = str(recipe.get(key) or "").strip()
+        if not raw_url:
+            continue
+        try:
+            parsed = urlparse(raw_url)
+        except ValueError:
+            continue
+        hostname = (parsed.hostname or "").casefold()
+        hostname = hostname.removeprefix("www.").removeprefix("m.")
+        video_id = ""
+        if hostname == "youtu.be":
+            video_id = parsed.path.strip("/").split("/", 1)[0]
+        elif hostname in {"youtube.com", "youtube-nocookie.com"}:
+            video_id = parse_qs(parsed.query).get("v", [""])[0]
+            if not video_id:
+                parts = [part for part in parsed.path.split("/") if part]
+                if len(parts) >= 2 and parts[0] in {"embed", "live", "shorts"}:
+                    video_id = parts[1]
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            return f"youtube:{video_id}"
+        if parsed.scheme in {"http", "https"} and parsed.hostname:
+            try:
+                port_number = parsed.port
+            except ValueError:
+                continue
+            port = f":{port_number}" if port_number else ""
+            path = parsed.path.rstrip("/") or "/"
+            return f"url:{parsed.scheme.casefold()}://{hostname}{port}{path}"
+    return ""
+
+
+def _review_bundle_payload(
+    raw: dict[str, Any], catalog: RecipeReader
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    recipes = raw.get("recipes")
+    if not isinstance(recipes, list) or not recipes:
+        raise ValueError("レビュー済みレシピを1件以上指定してください")
+    if len(recipes) > MAX_REVIEW_BUNDLE:
+        raise ValueError(f"一度に保存できるレシピは{MAX_REVIEW_BUNDLE}件までです")
+
+    existing_by_source: dict[str, dict[str, Any]] = {}
+    for existing in catalog.list():
+        identity = canonical_recipe_source(existing)
+        if identity:
+            existing_by_source.setdefault(identity, existing)
+
+    entries: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for index, raw_recipe in enumerate(recipes, start=1):
+        if not isinstance(raw_recipe, dict):
+            raise ValueError(f"{index}件目のレシピ形式が正しくありません")
+        if raw_recipe.get("servings_confirmed") is not True:
+            raise ValueError(f"{index}件目の基準人数が確認済みではありません")
+        recipe = validate_recipe(raw_recipe)
+        identity = canonical_recipe_source(recipe)
+        if not identity:
+            raise ValueError(f"{index}件目に有効な出典URLまたは動画URLがありません")
+        unresolved = raw_recipe.get("unresolved_fields", [])
+        if not isinstance(unresolved, list):
+            raise ValueError(f"{index}件目の未確認項目の形式が正しくありません")
+        unresolved = [str(item)[:300] for item in unresolved[:20] if str(item).strip()]
+        if unresolved:
+            review_note = f"未確認項目: {'／'.join(unresolved)}"
+            recipe["description"] = "\n\n".join(
+                part for part in (recipe["description"], review_note) if part
+            )[:2000]
+            if "要確認" not in recipe["tags"]:
+                recipe["tags"] = [*recipe["tags"], "要確認"][:30]
+        entry = {
+            "title": recipe["title"],
+            "source_url": recipe["video_url"] or recipe["source_url"],
+            "servings": recipe["servings"],
+            "ingredient_count": len(recipe["ingredients"]),
+            "step_count": len(recipe["steps"]),
+            "unresolved_fields": unresolved,
+        }
+        duplicate = existing_by_source.get(identity)
+        if duplicate:
+            entry.update(
+                disposition="duplicate",
+                duplicate_title=str(duplicate.get("title") or "既存レシピ"),
+            )
+        elif identity in seen_sources:
+            entry.update(
+                disposition="duplicate",
+                duplicate_title="同じバンドル内のレシピ",
+            )
+        else:
+            entry.update(disposition="candidate", duplicate_title="")
+            candidates.append(recipe)
+            seen_sources.add(identity)
+        entries.append(entry)
+
+    counts = {
+        "total": len(entries),
+        "candidate": sum(entry["disposition"] == "candidate" for entry in entries),
+        "duplicate": sum(entry["disposition"] == "duplicate" for entry in entries),
+        "unresolved": sum(bool(entry["unresolved_fields"]) for entry in entries),
+    }
+    token_payload = {
+        "entries": entries,
+        "candidates": candidates,
+    }
+    review_token = hashlib.sha256(
+        json.dumps(
+            token_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return {
+        "entries": entries,
+        "counts": counts,
+        "review_token": review_token,
+    }, candidates
+
+
+def preview_review_bundle(raw: dict[str, Any], catalog: RecipeReader) -> dict[str, Any]:
+    review, _ = _review_bundle_payload(raw, catalog)
+    return review
+
+
+def save_review_bundle(
+    raw: dict[str, Any], catalog: RecipeReader, store: RecipeStore
+) -> dict[str, Any]:
+    review, candidates = _review_bundle_payload(raw, catalog)
+    review_token = str(raw.get("review_token") or "")
+    if not review_token or not hmac.compare_digest(review_token, review["review_token"]):
+        raise ValueError("プレビュー結果が変わりました。もう一度内容を確認してください")
+    try:
+        confirm_count = int(raw.get("confirm_count"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("保存件数の確認が必要です") from exc
+    if confirm_count != len(candidates):
+        raise ValueError("確認した保存件数と候補数が一致しません")
+    if not candidates:
+        raise ValueError("新しく保存するレシピはありません")
+
+    saved_titles: list[str] = []
+    for recipe in candidates:
+        identity = canonical_recipe_source(recipe)
+        recipe_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"kitchen-companion:{identity}"))
+        store.save(recipe, recipe_id)
+        saved_titles.append(recipe["title"])
+    return {
+        "saved_count": len(saved_titles),
+        "saved_titles": saved_titles,
+        "duplicate_count": review["counts"]["duplicate"],
+    }
+
+
 def parse_ingredient(text: str) -> dict[str, Any]:
     original_text = str(text).strip()[:500]
     text = original_text.replace("½", "1/2").replace("¼", "1/4").replace("¾", "3/4")
@@ -1162,6 +1319,13 @@ class AppHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/import/video":
                 data = self.body()
                 self.json_response(import_video(str(data.get("url", ""))))
+            elif self.path == "/api/import/bundle/preview":
+                self.json_response(preview_review_bundle(self.body(), self.catalog))
+            elif self.path == "/api/import/bundle/save":
+                self.json_response(
+                    save_review_bundle(self.body(), self.catalog, self.store),
+                    HTTPStatus.CREATED,
+                )
             elif self.path == "/api/mealie/sync/verify":
                 if not self.mealie_sync:
                     self.json_response({"error": "Mealie確認はHome Assistant環境で利用できます"}, 409)

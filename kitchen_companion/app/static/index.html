@@ -107,6 +107,18 @@
               <p>Mealieのレシピは自動的に調理アシストへ反映されます。動画URLが登録されている場合はレシピ詳細にも表示します。</p>
               <button class="secondary-button" data-mode="assist" data-source-target="mealie">Mealieから選ぶ</button>
             </article>
+            <article class="import-option bundle-option">
+              <span class="feature-icon" aria-hidden="true">✓</span>
+              <h2>レビュー済みバンドル</h2>
+              <p>確認済みJSONを読み込み、Mealieとローカル下書きの重複をプレビューしてから保存します。一度に20件までです。</p>
+              <form id="bundleImportForm">
+                <label for="bundleImportFile">レビュー済みJSONファイル</label>
+                <input id="bundleImportFile" type="file" accept="application/json,.json" required>
+                <button class="primary-button" type="submit">重複と内容を確認</button>
+              </form>
+              <div class="bundle-review hidden" id="bundleReview" aria-live="polite"></div>
+              <button class="primary-button hidden" type="button" id="saveBundleButton">確認した下書きを保存</button>
+            </article>
           </div>
           <button class="secondary-button manual-recipe" data-action="open-editor">手入力でレシピを作成</button>
         </section>
