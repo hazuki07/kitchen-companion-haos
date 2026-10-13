@@ -174,7 +174,9 @@ def _timestamp_list(value: Any, length: int) -> list[int | None]:
 
 _INGREDIENT_NUMBER = r"(?:\d+\s*/\s*\d+|\d+(?:\.\d+)?)"
 _INGREDIENT_RANGE = rf"{_INGREDIENT_NUMBER}(?:\s*[〜～~-]\s*{_INGREDIENT_NUMBER})?"
-_INGREDIENT_UNIT = r"ml|mL|L|l|kg|g|個|本|枚|片|株|袋|缶|束|合|杯"
+_INGREDIENT_UNIT = (
+    r"ml|mL|L|l|kg|g|個|本|枚|片|株|袋|缶|束|合|杯|玉|丁|粒|房|尾|切れ|パック"
+)
 _INGREDIENT_PREFIX_UNIT = r"ティースプーン|大さじ|小さじ|カップ"
 _LEGACY_AMOUNT = (
     rf"(?:{_INGREDIENT_PREFIX_UNIT})\s*{_INGREDIENT_RANGE}(?:杯分)?"
@@ -297,8 +299,9 @@ def _ingredient(raw: Any) -> dict[str, Any] | None:
         else ""
     )
     note = str(raw.get("note") or "").strip()
-    if amount is None and not note:
-        note = display or "未確認"
+    original_text = str(raw.get("originalText") or "").strip()
+    if note and note in {name, display, original_text}:
+        note = ""
     return {
         "amount": amount,
         "amount_max": None,
@@ -306,7 +309,7 @@ def _ingredient(raw: Any) -> dict[str, Any] | None:
         "unit": str(unit.get("abbreviation") or unit.get("name") or "")[:30],
         "name": name[:200],
         "note": note[:200],
-        "original_text": (display or name)[:500],
+        "original_text": (original_text or display or name)[:500],
     }
 
 

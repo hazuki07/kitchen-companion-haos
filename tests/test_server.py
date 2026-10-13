@@ -595,6 +595,42 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual((ingredients[4]["amount"], ingredients[4]["unit"]), (1, "個"))
         self.assertEqual((ingredients[5]["amount"], ingredients[5]["unit"]), (1, "大さじ"))
 
+    def test_mealie_client_keeps_text_out_of_amounts(self) -> None:
+        transport = RecordingTransport(
+            [{
+                "slug": "fictional-stew",
+                "name": "架空シチュー",
+                "recipeServings": 2,
+                "recipeIngredient": [
+                    {
+                        "quantity": 0,
+                        "food": {"name": "架空玉ねぎ 1玉"},
+                        "note": "架空玉ねぎ 1玉",
+                        "display": "架空玉ねぎ 1玉 架空玉ねぎ 1玉",
+                    },
+                    {
+                        "quantity": 0,
+                        "food": {"name": "架空にんじん"},
+                        "note": "架空にんじん",
+                        "display": "架空にんじん 架空にんじん",
+                    },
+                ],
+                "recipeInstructions": [],
+            }]
+        )
+
+        recipe = MealieReadClient(transport).get("fictional-stew")
+
+        self.assertIsNotNone(recipe)
+        assert recipe is not None
+        onion, carrot = recipe["ingredients"]
+        self.assertEqual(onion["name"], "架空玉ねぎ")
+        self.assertEqual((onion["amount"], onion["unit"]), (1, "玉"))
+        self.assertEqual(onion["note"], "")
+        self.assertEqual(carrot["name"], "架空にんじん")
+        self.assertIsNone(carrot["amount"])
+        self.assertEqual(carrot["note"], "")
+
     def test_mealie_sync_client_creates_then_patches_recipe(self) -> None:
         transport = RecordingTransport(["fictional-soup", {"slug": "fictional-soup"}])
         client = MealieSyncClient(transport)
