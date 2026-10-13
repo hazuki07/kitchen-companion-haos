@@ -97,6 +97,14 @@ input:focus, textarea:focus, select:focus { border-color: var(--amber); box-shad
 .import-option form { display: grid; gap: 12px; margin-top: 20px; }
 .import-option .secondary-button { width: 100%; margin-top: 20px; }
 .mealie-option { background: #eaf3f0; }
+.bundle-option { grid-column: 1 / -1; }
+.bundle-review { margin-top: 20px; padding: 16px; border: 1px solid #cde4da; border-radius: 12px; background: #f3faf7; }
+.bundle-review strong { display: block; margin-bottom: 10px; }
+.bundle-review ul { margin: 0; padding-left: 20px; }
+.bundle-review li { margin: 7px 0; line-height: 1.5; }
+.bundle-review .duplicate { color: #84520e; }
+.bundle-review .unresolved { color: #8c2f27; font-size: .84rem; }
+#saveBundleButton { width: 100%; margin-top: 14px; }
 .manual-recipe { margin-top: 22px; }
 .tip-card { padding: 20px; border: 1px solid #d9e1e8; border-radius: 17px; background: #eaf3f0; color: #285c4d; }
 .tip-card p { margin: 6px 0 0; line-height: 1.5; font-size: .84rem; }

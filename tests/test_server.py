@@ -27,6 +27,7 @@ from app.integrations import (  # noqa: E402
     StageTimerController,
 )
 from app.server import (  # noqa: E402
+    MOCK_MEALIE_FIXTURE,
     JsonLdParser,
     RecipeStore,
     assert_public_host,
@@ -38,6 +39,8 @@ from app.server import (  # noqa: E402
     ingredient_amounts_match,
     parse_ingredient,
     parse_video_timestamp,
+    preview_review_bundle,
+    save_review_bundle,
     validate_recipe,
     video_draft_from_html,
 )
@@ -72,6 +75,19 @@ class BinaryRecordingTransport:
 
 
 class RecipeTests(unittest.TestCase):
+    @staticmethod
+    def reviewed_bundle_recipe(video_id: str = "AbCdEfGhI12") -> dict[str, Any]:
+        return {
+            "title": "架空の動画レシピ",
+            "servings": 2,
+            "servings_confirmed": True,
+            "source_url": f"https://www.youtube.com/watch?v={video_id}",
+            "video_url": f"https://youtu.be/{video_id}?t=15",
+            "ingredients": [{"amount": 100, "unit": "g", "name": "架空食材"}],
+            "steps": ["架空食材を調理する。"],
+            "unresolved_fields": ["火加減は未確認"],
+        }
+
     def test_store_round_trip_and_search(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RecipeStore(Path(directory) / "recipes.sqlite3")
@@ -97,6 +113,82 @@ class RecipeTests(unittest.TestCase):
     def test_validation_rejects_bad_servings(self) -> None:
         with self.assertRaisesRegex(ValueError, "人数"):
             validate_recipe({"title": "架空", "servings": 0, "ingredients": [], "steps": []})
+
+    def test_review_bundle_detects_normalized_youtube_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            store.save(
+                {
+                    **self.reviewed_bundle_recipe(),
+                    "title": "既存の架空レシピ",
+                    "video_url": "https://www.youtube.com/embed/AbCdEfGhI12",
+                }
+            )
+            catalog = CombinedRecipeCatalog(MockMealieCatalog(MOCK_MEALIE_FIXTURE), store)
+
+            review = preview_review_bundle(
+                {"recipes": [self.reviewed_bundle_recipe()]}, catalog
+            )
+
+            self.assertEqual(review["counts"]["candidate"], 0)
+            self.assertEqual(review["counts"]["duplicate"], 1)
+            self.assertEqual(review["entries"][0]["duplicate_title"], "既存の架空レシピ")
+
+    def test_review_bundle_requires_confirmed_servings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            catalog = CombinedRecipeCatalog(MockMealieCatalog(MOCK_MEALIE_FIXTURE), store)
+            recipe = {**self.reviewed_bundle_recipe(), "servings_confirmed": False}
+            with self.assertRaisesRegex(ValueError, "基準人数"):
+                preview_review_bundle({"recipes": [recipe]}, catalog)
+
+    def test_reviewed_bundle_save_requires_matching_preview_and_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            catalog = CombinedRecipeCatalog(MockMealieCatalog(MOCK_MEALIE_FIXTURE), store)
+            recipe = self.reviewed_bundle_recipe()
+            review = preview_review_bundle({"recipes": [recipe]}, catalog)
+
+            with self.assertRaisesRegex(ValueError, "プレビュー結果"):
+                save_review_bundle(
+                    {
+                        "recipes": [recipe],
+                        "review_token": "0" * 64,
+                        "confirm_count": 1,
+                    },
+                    catalog,
+                    store,
+                )
+
+            with self.assertRaisesRegex(ValueError, "保存件数"):
+                save_review_bundle(
+                    {
+                        "recipes": [recipe],
+                        "review_token": review["review_token"],
+                        "confirm_count": 2,
+                    },
+                    catalog,
+                    store,
+                )
+
+            result = save_review_bundle(
+                {
+                    "recipes": [recipe],
+                    "review_token": review["review_token"],
+                    "confirm_count": 1,
+                },
+                catalog,
+                store,
+            )
+            self.assertEqual(result["saved_count"], 1)
+            self.assertEqual(result["saved_titles"], ["架空の動画レシピ"])
+            saved = next(item for item in store.list() if item["title"] == "架空の動画レシピ")
+            self.assertIn("火加減は未確認", saved["description"])
+            self.assertIn("要確認", saved["tags"])
+
+            repeated = preview_review_bundle({"recipes": [recipe]}, catalog)
+            self.assertEqual(repeated["counts"]["candidate"], 0)
+            self.assertEqual(repeated["counts"]["duplicate"], 1)
 
     def test_portion_guidance_defaults_are_separate_from_recipe_amounts(self) -> None:
         recipe = validate_recipe(

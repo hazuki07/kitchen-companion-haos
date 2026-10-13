@@ -23,6 +23,7 @@ const state = {
   activeMode: "assist",
   sourceFilter: "all",
   catalogStatus: null,
+  bundleImport: null,
   quantityMode: "recipe",
   cookTab: "step",
 };
@@ -540,6 +541,85 @@ async function importFromVideo(event) {
       : "動画情報を入力しました。材料と工程を確認してください");
   } catch (error) { showToast(error.message); }
   finally { button.disabled = false; button.textContent = "動画から自動入力"; }
+}
+
+function renderBundleReview(review) {
+  const element = $("#bundleReview");
+  const counts = review.counts || {};
+  element.innerHTML = `<strong>保存候補 ${Number(counts.candidate || 0)}件・重複 ${Number(counts.duplicate || 0)}件・未確認項目あり ${Number(counts.unresolved || 0)}件</strong>
+    <ul>${review.entries.map((entry) => {
+      const duplicate = entry.disposition === "duplicate";
+      const unresolved = entry.unresolved_fields?.length
+        ? `<div class="unresolved">未確認：${entry.unresolved_fields.map(escapeHtml).join("／")}</div>`
+        : "";
+      return `<li class="${duplicate ? "duplicate" : ""}">${escapeHtml(entry.title)} — ${duplicate ? `重複（${escapeHtml(entry.duplicate_title)}）` : `${entry.servings}人分・材料${entry.ingredient_count}件・${entry.step_count}工程`}${unresolved}</li>`;
+    }).join("")}</ul>`;
+  element.classList.remove("hidden");
+  const saveButton = $("#saveBundleButton");
+  saveButton.textContent = `確認した${Number(counts.candidate || 0)}件を下書き保存`;
+  saveButton.classList.toggle("hidden", !counts.candidate);
+}
+
+async function previewBundleImport(event) {
+  event.preventDefault();
+  const file = $("#bundleImportFile").files[0];
+  if (!file) return;
+  if (file.size > 1_000_000) {
+    showToast("JSONファイルは1MB以下にしてください");
+    return;
+  }
+  const button = event.currentTarget.querySelector("button");
+  button.disabled = true;
+  button.textContent = "確認中…";
+  try {
+    const payload = JSON.parse(await file.text());
+    const review = await api("/api/import/bundle/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.bundleImport = { payload, review };
+    renderBundleReview(review);
+  } catch (error) {
+    state.bundleImport = null;
+    $("#bundleReview").classList.add("hidden");
+    $("#saveBundleButton").classList.add("hidden");
+    showToast(error instanceof SyntaxError ? "JSONファイルの形式が正しくありません" : error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "重複と内容を確認";
+  }
+}
+
+async function saveBundleImport() {
+  const current = state.bundleImport;
+  if (!current) return;
+  const count = Number(current.review.counts?.candidate || 0);
+  if (!count || !window.confirm(`確認した${count}件をローカル下書きとして保存しますか？`)) return;
+  const button = $("#saveBundleButton");
+  button.disabled = true;
+  button.textContent = "保存中…";
+  try {
+    const result = await api("/api/import/bundle/save", {
+      method: "POST",
+      body: JSON.stringify({
+        ...current.payload,
+        review_token: current.review.review_token,
+        confirm_count: count,
+      }),
+    });
+    state.bundleImport = null;
+    $("#bundleImportForm").reset();
+    $("#bundleReview").classList.add("hidden");
+    button.classList.add("hidden");
+    await loadRecipes();
+    setMode("assist");
+    showToast(`${result.saved_count}件のローカル下書きを保存しました`);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = `確認した${count}件を下書き保存`;
+  }
 }
 
 function recognitionErrorMessage(code) {
@@ -1117,6 +1197,8 @@ $("#recipeForm").addEventListener("submit", saveRecipe);
 $("#portionKindField").addEventListener("change", () => updatePortionFields(true));
 $("#importForm").addEventListener("submit", importFromUrl);
 $("#videoImportForm").addEventListener("submit", importFromVideo);
+$("#bundleImportForm").addEventListener("submit", previewBundleImport);
+$("#saveBundleButton").addEventListener("click", saveBundleImport);
 $("#prevStep").addEventListener("click", () => changeStep(-1));
 $("#nextStep").addEventListener("click", () => changeStep(1));
 $("#speakStep").addEventListener("click", () => sendCookingAction("show", true).catch((error) => showToast(error.message)));
@@ -1125,6 +1207,32 @@ function registerWebMcpTools() {
   const context = document.modelContext;
   if (!context?.registerTool) return;
   const registration = (tool) => Promise.resolve(context.registerTool(tool)).catch(() => {});
+  const reviewedRecipeSchema = {
+    type: "object",
+    properties: {
+      title: { type: "string", minLength: 1, maxLength: 160 },
+      description: { type: "string", maxLength: 2000 },
+      servings: { type: "number", exclusiveMinimum: 0, maximum: 100 },
+      servings_confirmed: { const: true },
+      source_url: { type: "string" },
+      video_url: { type: "string" },
+      ingredients: {
+        type: "array",
+        maxItems: 200,
+        items: { type: "object", additionalProperties: true },
+      },
+      steps: { type: "array", maxItems: 100, items: { type: "string" } },
+      step_video_timestamps: {
+        type: "array",
+        maxItems: 100,
+        items: { type: ["integer", "string", "null"] },
+      },
+      tags: { type: "array", maxItems: 30, items: { type: "string" } },
+      unresolved_fields: { type: "array", maxItems: 20, items: { type: "string" } },
+    },
+    required: ["title", "servings", "servings_confirmed", "ingredients", "steps"],
+    additionalProperties: true,
+  };
   registration({
     name: "search_recipes",
     title: "レシピを検索",
@@ -1176,6 +1284,52 @@ function registerWebMcpTools() {
       });
       await loadRecipes();
       return { id: recipe.id, title: recipe.title, saved: true };
+    },
+  });
+  registration({
+    name: "preview_reviewed_recipe_bundle",
+    title: "レビュー済みレシピの重複確認",
+    description: "Mealieとローカル下書きを読み取り、確認済みレシピを保存せずに重複判定します。保存前に必ず実行してください。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recipes: { type: "array", minItems: 1, maxItems: 20, items: reviewedRecipeSchema },
+      },
+      required: ["recipes"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, untrustedContentHint: true },
+    async execute(input) {
+      if (!input || !Array.isArray(input.recipes)) throw new Error("recipesが必要です");
+      return api("/api/import/bundle/preview", {
+        method: "POST",
+        body: JSON.stringify({ recipes: input.recipes }),
+      });
+    },
+  });
+  registration({
+    name: "save_reviewed_recipe_bundle",
+    title: "レビュー済みレシピを下書き保存",
+    description: "直前に重複確認したレシピだけをローカル下書きへ保存します。review_tokenとユーザーが承認した正確な件数が必要です。Mealieへは公開しません。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recipes: { type: "array", minItems: 1, maxItems: 20, items: reviewedRecipeSchema },
+        review_token: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        confirm_count: { type: "integer", minimum: 1, maximum: 20 },
+      },
+      required: ["recipes", "review_token", "confirm_count"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, untrustedContentHint: true },
+    async execute(input) {
+      if (!input || !Array.isArray(input.recipes)) throw new Error("recipesが必要です");
+      const result = await api("/api/import/bundle/save", {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+      await loadRecipes();
+      return result;
     },
   });
 }
