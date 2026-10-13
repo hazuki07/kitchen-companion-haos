@@ -35,6 +35,7 @@ from app.server import (  # noqa: E402
     extract_video_url,
     find_recipe_node,
     flatten_steps,
+    ingredient_amounts_match,
     parse_ingredient,
     parse_video_timestamp,
     validate_recipe,
@@ -216,6 +217,58 @@ class RecipeTests(unittest.TestCase):
                     },
                     "fictional-recipe",
                 )
+
+    def test_mealie_verification_compares_normalized_amounts(self) -> None:
+        local = {
+            "ingredients": [{
+                "amount": 0.5,
+                "amount_max": None,
+                "amount_text": "1/2",
+                "unit": "小さじ",
+                "name": "架空香辛料",
+                "note": "",
+                "original_text": "架空香辛料:小さじ1/2",
+            }]
+        }
+        remote = {
+            "ingredients": [{
+                "amount": 0.5,
+                "amount_max": None,
+                "amount_text": "0.5",
+                "unit": "小さじ",
+                "name": "架空香辛料",
+                "note": "",
+                "original_text": "0.5 小さじ 架空香辛料",
+            }]
+        }
+        self.assertTrue(ingredient_amounts_match(local, remote))
+        remote["ingredients"][0]["amount"] = 1
+        self.assertFalse(ingredient_amounts_match(local, remote))
+
+    def test_mealie_verification_allows_retry_without_creating_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            draft = create_normalized_draft(
+                store,
+                {
+                    "title": "架空の確認レシピ",
+                    "servings": 2,
+                    "servings_confirmed": True,
+                    "ingredients": [{"amount": 100, "unit": "g", "name": "架空食材"}],
+                    "steps": [],
+                },
+                "fictional-recipe",
+            )
+            state, slug, _ = store.begin_mealie_sync(draft["id"], "first")
+            self.assertEqual((state, slug), ("update", "fictional-recipe"))
+            store.mark_mealie_sync_unknown(draft["id"])
+
+            store.resolve_mealie_sync_verification(
+                draft["id"], "fictional-recipe", matched=False
+            )
+            self.assertIsNone(store.mealie_sync_state(draft["id"]))
+            retry_state, retry_slug, _ = store.begin_mealie_sync(draft["id"], "second")
+            self.assertEqual((retry_state, retry_slug), ("update", "fictional-recipe"))
 
     def test_video_timestamp_accepts_clock_formats(self) -> None:
         self.assertEqual(parse_video_timestamp("01:30"), 90)
