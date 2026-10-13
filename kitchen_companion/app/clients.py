@@ -172,14 +172,14 @@ def _timestamp_list(value: Any, length: int) -> list[int | None]:
     return result + [None] * (length - len(result))
 
 
-_INGREDIENT_NUMBER = r"\d+(?:\.\d+)?"
+_INGREDIENT_NUMBER = r"(?:\d+\s*/\s*\d+|\d+(?:\.\d+)?)"
 _INGREDIENT_RANGE = rf"{_INGREDIENT_NUMBER}(?:\s*[〜～~-]\s*{_INGREDIENT_NUMBER})?"
 _INGREDIENT_UNIT = r"ml|mL|L|l|kg|g|個|本|枚|片|株|袋|缶|束|合|杯"
 _INGREDIENT_PREFIX_UNIT = r"ティースプーン|大さじ|小さじ|カップ"
 _LEGACY_AMOUNT = (
     rf"(?:{_INGREDIENT_PREFIX_UNIT})\s*{_INGREDIENT_RANGE}(?:杯分)?"
     rf"|{_INGREDIENT_RANGE}\s*(?:{_INGREDIENT_UNIT})(?:分)?"
-    r"|適量|少々|ひとつまみ"
+    r"|適量|(?:多めの)?少々|ひとつまみ"
 )
 _LEGACY_INGREDIENT_PAIR = re.compile(
     rf"(?P<name>.+?)\s*(?:\.{{2,}}|…+)\s*(?P<amount>{_LEGACY_AMOUNT})"
@@ -189,7 +189,7 @@ _LEGACY_INGREDIENT_PAIR = re.compile(
 
 def _legacy_amount(value: str) -> tuple[float | None, float | None, str, str, str]:
     text = value.strip()
-    if text in {"適量", "少々", "ひとつまみ"}:
+    if text in {"適量", "少々", "多めの少々", "ひとつまみ"}:
         return None, None, "", "", text
     prefix = re.fullmatch(
         rf"(?P<unit>{_INGREDIENT_PREFIX_UNIT})\s*(?P<amount>{_INGREDIENT_RANGE})(?:杯分)?",
@@ -204,8 +204,19 @@ def _legacy_amount(value: str) -> tuple[float | None, float | None, str, str, st
         return None, None, "", "", text
     amount_text = re.sub(r"\s+", "", match.group("amount")).replace("～", "〜")
     bounds = re.split(r"[〜~-]", amount_text, maxsplit=1)
-    amount = float(bounds[0])
-    amount_max = float(bounds[1]) if len(bounds) == 2 else None
+
+    def number(part: str) -> float | None:
+        if "/" not in part:
+            return float(part)
+        numerator, denominator = part.split("/", 1)
+        if float(denominator) == 0:
+            return None
+        return float(numerator) / float(denominator)
+
+    amount = number(bounds[0])
+    amount_max = number(bounds[1]) if len(bounds) == 2 else None
+    if amount is None or (len(bounds) == 2 and amount_max is None):
+        return None, None, "", "", text
     return amount, amount_max, amount_text, match.group("unit"), ""
 
 
@@ -240,7 +251,10 @@ def _legacy_ingredients(text: str) -> list[dict[str, Any]]:
 
 def _simple_ingredient(text: str) -> dict[str, Any] | None:
     text = re.sub(r"\s+", " ", text).strip()
-    match = re.fullmatch(rf"(?P<name>.+?)\s+(?P<amount>{_LEGACY_AMOUNT})", text)
+    match = re.fullmatch(
+        rf"(?P<name>.+)(?:\s+|[:：])(?P<amount>{_LEGACY_AMOUNT})",
+        text,
+    )
     if not match:
         return None
     name = match.group("name").strip()
@@ -317,10 +331,16 @@ def _ingredients(raw: Any) -> list[dict[str, Any]]:
             else:
                 quantity = _number(value.get("quantity"))
                 if quantity is None or quantity <= 0:
+                    simple_candidates = (
+                        food.get("name"),
+                        value.get("originalText"),
+                        value.get("display"),
+                        value.get("note"),
+                    )
                     simple = next(
                         (
                             item
-                            for candidate in candidates
+                            for candidate in simple_candidates
                             if (item := _simple_ingredient(str(candidate or "")))
                         ),
                         None,
