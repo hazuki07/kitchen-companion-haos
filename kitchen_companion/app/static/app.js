@@ -449,7 +449,9 @@ function renderDetail() {
   if (!guidance.length) state.quantityMode = "recipe";
   const showingGuidance = state.quantityMode === "guidance";
   const syncButton = !recipe.read_only && state.runtime?.mealie_sync_enabled
-    ? recipe.mealie_sync_status === "synced"
+    ? recipe.servings_confirmed === false
+      ? '<button class="secondary-button" disabled>基準人数の確認後にMealie同期</button>'
+      : recipe.mealie_sync_status === "synced"
       ? '<button class="secondary-button" disabled>Mealie同期済み</button>'
       : recipe.mealie_sync_status === "outcome_unknown"
         ? '<button class="secondary-button" data-action="verify-mealie">Mealieで確認</button>'
@@ -466,6 +468,7 @@ function renderDetail() {
     <div class="detail-hero">
       <div class="detail-image">${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(recipe.title)}">` : ""}</div>
       <div class="detail-copy"><p class="eyebrow">READY TO COOK</p><h1>${escapeHtml(recipe.title)}</h1><p>${escapeHtml(recipe.description)}</p>
+        ${recipe.servings_confirmed === false ? '<p class="unresolved">基準人数は未確認です。編集画面で人数を確認するとMealieへ同期できます。</p>' : ""}
         <div class="serving-control"><button data-multiplier="-1" aria-label="倍率を下げる">−</button><strong>${formatNumber(state.multiplier)}倍</strong><button data-multiplier="1" aria-label="倍率を上げる">＋</button></div>
         <div class="quantity-mode" aria-label="分量の表示方法">
           <button class="${showingGuidance ? "" : "active"}" data-quantity-mode="recipe" aria-pressed="${!showingGuidance}">メニューの分量</button>
@@ -616,6 +619,7 @@ function openEditor(recipe = null, videoOnly = false) {
   $("#editorTitle").textContent = videoOnly ? "動画レシピを登録" : recipe ? "レシピを編集" : "レシピを登録";
   $("#titleField").value = recipe?.title || "";
   $("#servingsField").value = recipe?.servings || 2;
+  $("#servingsConfirmedField").checked = recipe?.servings_confirmed !== false;
   $("#portionKindField").value = recipe?.portion_kind || "standard";
   $("#meatPerPersonField").value = recipe?.meat_g_per_person ?? 200;
   $("#servingVolumeField").value = recipe?.serving_volume_ml ?? 300;
@@ -646,6 +650,7 @@ async function saveRecipe(event) {
   const payload = {
     title: $("#titleField").value,
     servings: Number($("#servingsField").value),
+    servings_confirmed: $("#servingsConfirmedField").checked,
     portion_kind: $("#portionKindField").value,
     meat_g_per_person: Number($("#meatPerPersonField").value),
     serving_volume_ml: Number($("#servingVolumeField").value),
@@ -711,7 +716,10 @@ function renderBundleReview(review) {
       const unresolved = entry.unresolved_fields?.length
         ? `<div class="unresolved">未確認：${entry.unresolved_fields.map(escapeHtml).join("／")}</div>`
         : "";
-      return `<li class="${duplicate ? "duplicate" : ""}">${escapeHtml(entry.title)} — ${duplicate ? `重複（${escapeHtml(entry.duplicate_title)}）` : `${entry.servings}人分・材料${entry.ingredient_count}件・${entry.step_count}工程`}${unresolved}</li>`;
+      const yieldLabel = entry.servings_confirmed === false
+        ? `基準人数未確認（仮値${entry.servings}）`
+        : `${entry.servings}人分`;
+      return `<li class="${duplicate ? "duplicate" : ""}">${escapeHtml(entry.title)} — ${duplicate ? `重複（${escapeHtml(entry.duplicate_title)}）` : `${yieldLabel}・材料${entry.ingredient_count}件・${entry.step_count}工程`}${unresolved}</li>`;
     }).join("")}</ul>`;
   element.classList.remove("hidden");
   const saveButton = $("#saveBundleButton");
@@ -1404,7 +1412,7 @@ function registerWebMcpTools() {
       title: { type: "string", minLength: 1, maxLength: 160 },
       description: { type: "string", maxLength: 2000 },
       servings: { type: "number", exclusiveMinimum: 0, maximum: 100 },
-      servings_confirmed: { const: true },
+      servings_confirmed: { type: "boolean" },
       source_url: { type: "string" },
       video_url: { type: "string" },
       ingredients: {
