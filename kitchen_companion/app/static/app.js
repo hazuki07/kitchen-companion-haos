@@ -288,14 +288,14 @@ function renderDetail() {
     ? recipe.mealie_sync_status === "synced"
       ? '<button class="secondary-button" disabled>Mealie同期済み</button>'
       : recipe.mealie_sync_status === "outcome_unknown"
-        ? '<button class="secondary-button" disabled>Mealieで確認</button>'
+        ? '<button class="secondary-button" data-action="verify-mealie">Mealieで確認</button>'
         : '<button class="secondary-button" data-action="sync-mealie">Mealieへ同期</button>'
     : "";
   const deleteControl = recipe.read_only
     ? '<p class="delete-guidance">このレシピを削除する場合はMealie側で削除し、一覧の「更新」を押してください。</p>'
     : '<button class="danger-button" data-action="delete-current">ローカル下書きを削除</button>';
   const normalizeButton = recipe.read_only && recipe.source_kind === "mealie" && state.runtime?.mealie_sync_enabled
-    ? '<button class="secondary-button" data-action="normalize-current">正規化してMealieへ反映</button>'
+    ? '<button class="secondary-button" data-action="normalize-current">分量を正規化</button>'
     : "";
   $("#detailView").innerHTML = `
     <button class="back-button" data-action="home">← レシピ一覧</button>
@@ -340,28 +340,40 @@ async function deleteCurrentRecipe() {
 async function normalizeCurrentRecipe(button) {
   const recipe = state.selected;
   if (!recipe || !recipe.read_only || recipe.source_kind !== "mealie") return;
-  if (!window.confirm(`「${recipe.title}」の材料を正規化し、Mealieの既存レシピへ反映しますか？`)) return;
   button.disabled = true;
-  let draft = null;
   try {
-    draft = await api(`/api/catalog/recipes/${encodeURIComponent(recipe.id)}/normalize`, {
+    const draft = await api(`/api/catalog/recipes/${encodeURIComponent(recipe.id)}/normalize`, {
       method: "POST",
-    });
-    await api("/api/mealie/sync", {
-      method: "POST",
-      body: JSON.stringify({ recipe_id: draft.id }),
     });
     await loadRecipes($("#searchInput").value);
-    const normalized = state.recipes.find((item) => item.id === recipe.id);
-    if (normalized) openDetail(normalized);
-    showToast("正規化した内容をMealieへ反映しました");
+    const normalizedDraft = state.recipes.find((item) => item.id === draft.id) || draft;
+    openDetail(normalizedDraft);
+    showToast("分量を正規化しました。倍率変更または編集後にMealieへ同期できます");
   } catch (error) {
     button.disabled = false;
-    if (draft) {
-      await loadRecipes($("#searchInput").value).catch(() => {});
-      const savedDraft = state.recipes.find((item) => item.id === draft.id);
-      if (savedDraft) openDetail(savedDraft);
-    }
+    showToast(error.message);
+  }
+}
+
+async function verifyMealieSync(button) {
+  const recipe = state.selected;
+  if (!recipe || recipe.read_only || recipe.mealie_sync_status !== "outcome_unknown") return;
+  button.disabled = true;
+  try {
+    const result = await api("/api/mealie/sync/verify", {
+      method: "POST",
+      body: JSON.stringify({ recipe_id: recipe.id }),
+    });
+    await loadRecipes($("#searchInput").value);
+    const next = result.status === "synced"
+      ? state.recipes.find((item) => item.id === result.mealie_slug)
+      : state.recipes.find((item) => item.id === recipe.id);
+    if (next) openDetail(next);
+    showToast(result.status === "synced"
+      ? "Mealieへの反映を確認しました"
+      : "Mealieには未反映でした。内容を確認して再同期できます");
+  } catch (error) {
+    button.disabled = false;
     showToast(error.message);
   }
 }
@@ -1064,6 +1076,7 @@ document.addEventListener("click", (event) => {
     "close-editor": () => $("#editorDialog").close(),
     "edit-current": () => openEditor(state.selected.read_only ? { ...state.selected, id: "" } : state.selected),
     "normalize-current": () => normalizeCurrentRecipe(target),
+    "verify-mealie": () => verifyMealieSync(target),
     "sync-mealie": () => syncCurrentRecipe(target),
     "delete-current": deleteCurrentRecipe,
     "refresh-recipes": () => loadRecipes($("#searchInput").value).catch((error) => showToast(error.message)),

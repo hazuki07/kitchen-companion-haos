@@ -339,6 +339,51 @@ class RecipeStore:
                 (utc_now(), recipe_id),
             )
 
+    def mealie_sync_state(self, recipe_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT mealie_slug, status FROM mealie_sync_records "
+                "WHERE local_recipe_id = ?",
+                (recipe_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def resolve_mealie_sync_verification(
+        self, recipe_id: str, mealie_slug: str, matched: bool
+    ) -> None:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT status, mealie_slug FROM mealie_sync_records "
+                "WHERE local_recipe_id = ?",
+                (recipe_id,),
+            ).fetchone()
+            if (
+                not row
+                or row["status"] != "outcome_unknown"
+                or str(row["mealie_slug"] or "") != mealie_slug
+            ):
+                raise ValueError("確認対象のMealie同期状態が見つかりません")
+            if matched:
+                response = json.dumps(
+                    {"status": "synced", "mealie_slug": mealie_slug},
+                    ensure_ascii=False,
+                )
+                db.execute(
+                    "UPDATE mealie_sync_records SET status = 'synced', response_json = ?, "
+                    "updated_at = ? WHERE local_recipe_id = ?",
+                    (response, utc_now(), recipe_id),
+                )
+                return
+            db.execute(
+                "UPDATE recipes SET origin_mealie_slug = ? WHERE id = ?",
+                (mealie_slug, recipe_id),
+            )
+            db.execute(
+                "DELETE FROM mealie_sync_records WHERE local_recipe_id = ?",
+                (recipe_id,),
+            )
+
     def begin_action(self, request_id: str, fingerprint: str) -> tuple[str, dict[str, Any] | None]:
         now = utc_now()
         with self.connect() as db:
@@ -602,6 +647,26 @@ def create_normalized_draft(
     )
     store.set_origin_mealie_slug(draft_id, mealie_slug)
     return store.get(draft_id) or draft
+
+
+def ingredient_amounts_match(local: dict[str, Any], remote: dict[str, Any]) -> bool:
+    def semantic(recipe: dict[str, Any]) -> list[tuple[Any, ...]]:
+        result = []
+        for item in recipe.get("ingredients", []):
+            if not isinstance(item, dict):
+                continue
+            result.append(
+                (
+                    item.get("amount"),
+                    item.get("amount_max"),
+                    str(item.get("unit") or "").strip().casefold(),
+                    str(item.get("name") or "").strip().casefold(),
+                    str(item.get("note") or "").strip().casefold(),
+                )
+            )
+        return result
+
+    return semantic(local) == semantic(remote)
 
 
 def parse_ingredient(text: str) -> dict[str, Any]:
@@ -1097,6 +1162,37 @@ class AppHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/import/video":
                 data = self.body()
                 self.json_response(import_video(str(data.get("url", ""))))
+            elif self.path == "/api/mealie/sync/verify":
+                if not self.mealie_sync:
+                    self.json_response({"error": "Mealie確認はHome Assistant環境で利用できます"}, 409)
+                    return
+                data = self.body()
+                recipe_id = str(data.get("recipe_id") or "")
+                recipe = self.store.get(recipe_id)
+                sync_state = self.store.mealie_sync_state(recipe_id)
+                if not recipe or not sync_state or sync_state.get("status") != "outcome_unknown":
+                    self.json_response({"error": "確認する同期結果が見つかりません"}, 404)
+                    return
+                mealie_slug = str(sync_state.get("mealie_slug") or "")
+                if not re.fullmatch(r"[a-zA-Z0-9_-]+", mealie_slug):
+                    self.json_response({"error": "確認するMealieレシピが特定できません"}, 409)
+                    return
+                try:
+                    remote = self.catalog.get(mealie_slug)
+                except IntegrationError:
+                    self.json_response({"error": "Mealieから確認結果を取得できませんでした"}, 502)
+                    return
+                if not remote or remote.get("source_kind") != "mealie":
+                    self.json_response({"error": "Mealie側のレシピを確認できませんでした"}, 409)
+                    return
+                matched = ingredient_amounts_match(recipe, remote)
+                self.store.resolve_mealie_sync_verification(recipe_id, mealie_slug, matched)
+                self.json_response(
+                    {
+                        "status": "synced" if matched else "retry_ready",
+                        "mealie_slug": mealie_slug,
+                    }
+                )
             elif self.path == "/api/mealie/sync":
                 if not self.mealie_sync:
                     self.json_response({"error": "Mealie同期はHome Assistant環境で利用できます"}, 409)
