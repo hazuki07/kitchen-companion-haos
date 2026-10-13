@@ -132,7 +132,11 @@ function formatVideoTimestamp(value) {
 }
 
 function scaledIngredient(item, multiplier = 1) {
-  if (item.amount == null) return item.note || "適量";
+  if (item.amount == null) {
+    const qualitativeAmounts = new Set(["適量", "少々", "多めの少々", "ひとつまみ"]);
+    const note = String(item.note || "").trim();
+    return qualitativeAmounts.has(note) ? note : "未確認";
+  }
   const ratio = positiveNumber(multiplier, 1);
   const minimum = formatNumber(Number(item.amount) * ratio);
   const maximum = item.amount_max == null ? "" : formatNumber(Number(item.amount_max) * ratio);
