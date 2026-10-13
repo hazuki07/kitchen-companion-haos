@@ -710,7 +710,8 @@ async function importFromVideo(event) {
 function renderBundleReview(review) {
   const element = $("#bundleReview");
   const counts = review.counts || {};
-  element.innerHTML = `<strong>保存候補 ${Number(counts.candidate || 0)}件・重複 ${Number(counts.duplicate || 0)}件・未確認項目あり ${Number(counts.unresolved || 0)}件</strong>
+  const batchLabel = Number(review.batch_count || 1) > 1 ? `・${Number(review.batch_count)}バッチ` : "";
+  element.innerHTML = `<strong>保存候補 ${Number(counts.candidate || 0)}件・重複 ${Number(counts.duplicate || 0)}件・未確認項目あり ${Number(counts.unresolved || 0)}件${batchLabel}</strong>
     <ul>${review.entries.map((entry) => {
       const duplicate = entry.disposition === "duplicate";
       const unresolved = entry.unresolved_fields?.length
@@ -731,20 +732,42 @@ async function previewBundleImport(event) {
   event.preventDefault();
   const file = $("#bundleImportFile").files[0];
   if (!file) return;
-  if (file.size > 1_000_000) {
-    showToast("JSONファイルは1MB以下にしてください");
+  if (file.size > 5_000_000) {
+    showToast("JSONファイルは5MB以下にしてください");
     return;
   }
   const button = event.currentTarget.querySelector("button");
   button.disabled = true;
   button.textContent = "確認中…";
   try {
-    const payload = JSON.parse(await file.text());
-    const review = await api("/api/import/bundle/preview", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    state.bundleImport = { payload, review };
+    const sourcePayload = JSON.parse(await file.text());
+    if (!sourcePayload || !Array.isArray(sourcePayload.recipes) || !sourcePayload.recipes.length) {
+      throw new Error("recipesが必要です");
+    }
+    if (sourcePayload.recipes.length > 400) {
+      throw new Error("一度に確認できるレシピは400件までです");
+    }
+    const batches = [];
+    for (let offset = 0; offset < sourcePayload.recipes.length; offset += 20) {
+      const payload = { ...sourcePayload, recipes: sourcePayload.recipes.slice(offset, offset + 20) };
+      button.textContent = `確認中… ${batches.length + 1}/${Math.ceil(sourcePayload.recipes.length / 20)}`;
+      const review = await api("/api/import/bundle/preview", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      batches.push({ payload, review });
+    }
+    const review = {
+      entries: batches.flatMap((batch) => batch.review.entries || []),
+      counts: batches.reduce((total, batch) => {
+        for (const key of ["total", "candidate", "duplicate", "unresolved"]) {
+          total[key] += Number(batch.review.counts?.[key] || 0);
+        }
+        return total;
+      }, { total: 0, candidate: 0, duplicate: 0, unresolved: 0 }),
+      batch_count: batches.length,
+    };
+    state.bundleImport = { batches, review };
     renderBundleReview(review);
   } catch (error) {
     state.bundleImport = null;
@@ -766,22 +789,40 @@ async function saveBundleImport() {
   button.disabled = true;
   button.textContent = "保存中…";
   try {
-    const result = await api("/api/import/bundle/save", {
-      method: "POST",
-      body: JSON.stringify({
-        ...current.payload,
-        review_token: current.review.review_token,
-        confirm_count: count,
-      }),
-    });
+    let savedCount = 0;
+    for (let index = 0; index < current.batches.length; index += 1) {
+      const batch = current.batches[index];
+      const batchCount = Number(batch.review.counts?.candidate || 0);
+      if (!batchCount) continue;
+      button.textContent = `保存中… ${index + 1}/${current.batches.length}`;
+      const latestReview = await api("/api/import/bundle/preview", {
+        method: "POST",
+        body: JSON.stringify(batch.payload),
+      });
+      if (latestReview.review_token !== batch.review.review_token) {
+        throw new Error("プレビュー結果が変わりました。ファイルをもう一度確認してください");
+      }
+      const result = await api("/api/import/bundle/save", {
+        method: "POST",
+        body: JSON.stringify({
+          ...batch.payload,
+          review_token: latestReview.review_token,
+          confirm_count: batchCount,
+        }),
+      });
+      savedCount += Number(result.saved_count || 0);
+    }
     state.bundleImport = null;
     $("#bundleImportForm").reset();
     $("#bundleReview").classList.add("hidden");
     button.classList.add("hidden");
     await loadRecipes();
     setMode("assist");
-    showToast(`${result.saved_count}件のローカル下書きを保存しました`);
+    showToast(`${savedCount}件のローカル下書きを保存しました`);
   } catch (error) {
+    state.bundleImport = null;
+    $("#bundleReview").classList.add("hidden");
+    button.classList.add("hidden");
     showToast(error.message);
   } finally {
     button.disabled = false;
