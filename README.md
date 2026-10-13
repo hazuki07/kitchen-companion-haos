@@ -50,7 +50,14 @@ Mealieから取得した基準人数や材料の量が空欄の場合は推測�
 
 ## 開発環境で試す
 
-Python 3.12以上を使用します。外部パッケージは不要です。
+Python 3.12以上を使用します。Appの実行時に外部パッケージは不要です。
+
+開発用ツールは仮想環境へインストールします。
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+```
 
 ```sh
 cd kitchen_companion
@@ -119,6 +126,7 @@ https://github.com/hazuki07/kitchen-companion-haos
 ```sh
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q kitchen_companion/app
+.venv/bin/ruff check --config pyproject.toml kitchen_companion/app tests
 ```
 
 テストは一時DBと架空データのみを使い、外部サイトへ接続しません。

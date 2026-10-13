@@ -74,6 +74,7 @@ class RecipeStore:
                     dilution_mixer_parts REAL NOT NULL DEFAULT 7,
                     meat_g_per_person REAL NOT NULL DEFAULT 0,
                     rice_go_per_person REAL NOT NULL DEFAULT 0,
+                    origin_mealie_slug TEXT NOT NULL DEFAULT '',
                     ingredients_json TEXT NOT NULL,
                     steps_json TEXT NOT NULL,
                     step_video_timestamps_json TEXT NOT NULL DEFAULT '[]',
@@ -115,6 +116,7 @@ class RecipeStore:
                 "dilution_mixer_parts": "REAL NOT NULL DEFAULT 7",
                 "meat_g_per_person": "REAL NOT NULL DEFAULT 0",
                 "rice_go_per_person": "REAL NOT NULL DEFAULT 0",
+                "origin_mealie_slug": "TEXT NOT NULL DEFAULT ''",
                 "step_video_timestamps_json": "TEXT NOT NULL DEFAULT '[]'",
             }
             for column, definition in migrations.items():
@@ -260,6 +262,15 @@ class RecipeStore:
             cursor = db.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
         return cursor.rowcount > 0
 
+    def set_origin_mealie_slug(self, recipe_id: str, slug: str) -> None:
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", slug):
+            raise ValueError("Mealie recipe slugが正しくありません")
+        with self.connect() as db:
+            db.execute(
+                "UPDATE recipes SET origin_mealie_slug = ? WHERE id = ?",
+                (slug, recipe_id),
+            )
+
     def begin_mealie_sync(
         self, recipe_id: str, fingerprint: str
     ) -> tuple[str, str | None, dict[str, Any] | None]:
@@ -283,6 +294,19 @@ class RecipeStore:
                     (fingerprint, now, recipe_id),
                 )
                 return "update", row["mealie_slug"], None
+            origin = db.execute(
+                "SELECT origin_mealie_slug FROM recipes WHERE id = ?",
+                (recipe_id,),
+            ).fetchone()
+            origin_slug = str(origin["origin_mealie_slug"] or "") if origin else ""
+            if origin_slug:
+                db.execute(
+                    "INSERT INTO mealie_sync_records "
+                    "(local_recipe_id, recipe_fingerprint, mealie_slug, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'pending', ?, ?)",
+                    (recipe_id, fingerprint, origin_slug, now, now),
+                )
+                return "update", origin_slug, None
             db.execute(
                 "INSERT INTO mealie_sync_records "
                 "(local_recipe_id, recipe_fingerprint, status, created_at, updated_at) "
@@ -464,6 +488,16 @@ def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
                     amount = None
             else:
                 amount = None
+            amount_max = item.get("amount_max")
+            if amount_max not in (None, ""):
+                try:
+                    amount_max = float(amount_max)
+                except (TypeError, ValueError):
+                    amount_max = None
+            else:
+                amount_max = None
+            if amount is None or (amount_max is not None and amount_max < amount):
+                amount_max = None
             amount_text = str(item.get("amount_text", "")).strip()[:50]
             if amount is not None and not amount_text:
                 amount_text = f"{amount:g}"
@@ -478,6 +512,7 @@ def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
             clean_ingredients.append(
                 {
                     "amount": amount,
+                    "amount_max": amount_max,
                     "amount_text": amount_text,
                     "unit": unit,
                     "name": name,
@@ -536,6 +571,39 @@ def safe_image_url(value: Any) -> str:
     return safe_http_url(value)
 
 
+def create_normalized_draft(
+    store: RecipeStore, recipe: dict[str, Any], mealie_slug: str
+) -> dict[str, Any]:
+    if recipe.get("servings_confirmed") is False:
+        raise ValueError("基準人数を確認してから正規化してください")
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", mealie_slug):
+        raise ValueError("Mealie recipe slugが正しくありません")
+    draft_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"kitchen-companion:mealie:{mealie_slug}"))
+    existing = store.get(draft_id)
+    if existing and existing.get("mealie_sync_status") != "synced":
+        return existing
+    image_url = str(recipe.get("image_url") or "")
+    if image_url and not (
+        image_url.startswith(("assets/", "/assets/", "http://", "https://"))
+    ):
+        image_url = ""
+    fields = (
+        "title", "description", "servings", "source_url", "video_url",
+        "portion_kind", "serving_volume_ml", "dilution_concentrate_parts",
+        "dilution_mixer_parts", "meat_g_per_person", "rice_go_per_person",
+        "ingredients", "steps", "step_video_timestamps", "tags",
+    )
+    draft = store.save(
+        {
+            **{key: recipe[key] for key in fields if recipe.get(key) is not None},
+            "image_url": image_url,
+        },
+        draft_id,
+    )
+    store.set_origin_mealie_slug(draft_id, mealie_slug)
+    return store.get(draft_id) or draft
+
+
 def parse_ingredient(text: str) -> dict[str, Any]:
     original_text = str(text).strip()[:500]
     text = original_text.replace("½", "1/2").replace("¼", "1/4").replace("¾", "3/4")
@@ -553,6 +621,7 @@ def parse_ingredient(text: str) -> dict[str, Any]:
             if not match:
                 return {
                     "amount": None,
+                    "amount_max": None,
                     "amount_text": "",
                     "unit": "",
                     "name": text[:200],
@@ -568,6 +637,7 @@ def parse_ingredient(text: str) -> dict[str, Any]:
         amount = float(number)
     return {
         "amount": amount,
+        "amount_max": None,
         "amount_text": number[:50],
         "unit": unit,
         "name": name[:200],
@@ -1008,7 +1078,18 @@ class AppHandler(BaseHTTPRequestHandler):
         if not self.ingress_allowed():
             return
         try:
-            if self.path == "/api/recipes":
+            normalize_match = re.fullmatch(
+                r"/api/catalog/recipes/([a-zA-Z0-9_-]+)/normalize", self.path
+            )
+            if normalize_match:
+                mealie_slug = normalize_match.group(1)
+                recipe = self.catalog.get(mealie_slug)
+                if not recipe or recipe.get("source_kind") != "mealie":
+                    self.json_response({"error": "正規化するMealieレシピが見つかりません"}, 404)
+                    return
+                draft = create_normalized_draft(self.store, recipe, mealie_slug)
+                self.json_response(draft, HTTPStatus.CREATED)
+            elif self.path == "/api/recipes":
                 self.json_response(self.store.save(self.body()), HTTPStatus.CREATED)
             elif self.path == "/api/import":
                 data = self.body()

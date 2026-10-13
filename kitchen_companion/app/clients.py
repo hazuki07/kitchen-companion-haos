@@ -172,10 +172,96 @@ def _timestamp_list(value: Any, length: int) -> list[int | None]:
     return result + [None] * (length - len(result))
 
 
+_INGREDIENT_NUMBER = r"\d+(?:\.\d+)?"
+_INGREDIENT_RANGE = rf"{_INGREDIENT_NUMBER}(?:\s*[〜～~-]\s*{_INGREDIENT_NUMBER})?"
+_INGREDIENT_UNIT = r"ml|mL|L|l|kg|g|個|本|枚|片|株|袋|缶|束|合|杯"
+_INGREDIENT_PREFIX_UNIT = r"ティースプーン|大さじ|小さじ|カップ"
+_LEGACY_AMOUNT = (
+    rf"(?:{_INGREDIENT_PREFIX_UNIT})\s*{_INGREDIENT_RANGE}(?:杯分)?"
+    rf"|{_INGREDIENT_RANGE}\s*(?:{_INGREDIENT_UNIT})(?:分)?"
+    r"|適量|少々|ひとつまみ"
+)
+_LEGACY_INGREDIENT_PAIR = re.compile(
+    rf"(?P<name>.+?)\s*(?:\.{{2,}}|…+)\s*(?P<amount>{_LEGACY_AMOUNT})"
+    rf"(?=\s+.+?\s*(?:\.{{2,}}|…+)\s*(?:{_LEGACY_AMOUNT})|$)"
+)
+
+
+def _legacy_amount(value: str) -> tuple[float | None, float | None, str, str, str]:
+    text = value.strip()
+    if text in {"適量", "少々", "ひとつまみ"}:
+        return None, None, "", "", text
+    prefix = re.fullmatch(
+        rf"(?P<unit>{_INGREDIENT_PREFIX_UNIT})\s*(?P<amount>{_INGREDIENT_RANGE})(?:杯分)?",
+        text,
+    )
+    suffix = re.fullmatch(
+        rf"(?P<amount>{_INGREDIENT_RANGE})\s*(?P<unit>{_INGREDIENT_UNIT})(?:分)?",
+        text,
+    )
+    match = prefix or suffix
+    if not match:
+        return None, None, "", "", text
+    amount_text = re.sub(r"\s+", "", match.group("amount")).replace("～", "〜")
+    bounds = re.split(r"[〜~-]", amount_text, maxsplit=1)
+    amount = float(bounds[0])
+    amount_max = float(bounds[1]) if len(bounds) == 2 else None
+    return amount, amount_max, amount_text, match.group("unit"), ""
+
+
+def _legacy_ingredients(text: str) -> list[dict[str, Any]]:
+    text = re.sub(r"\s+", " ", text).strip()
+    if not re.search(r"(?:\.{2,}|…+)", text):
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _LEGACY_INGREDIENT_PAIR.finditer(text):
+        name = match.group("name").strip()
+        amount_source = match.group("amount").strip()
+        key = (name, amount_source)
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        amount, amount_max, amount_text, unit, note = _legacy_amount(amount_source)
+        original_text = f"{name}...{amount_source}"
+        result.append(
+            {
+                "amount": amount,
+                "amount_max": amount_max,
+                "amount_text": amount_text,
+                "unit": unit[:30],
+                "name": name[:200],
+                "note": note,
+                "original_text": original_text[:500],
+            }
+        )
+    return result
+
+
+def _simple_ingredient(text: str) -> dict[str, Any] | None:
+    text = re.sub(r"\s+", " ", text).strip()
+    match = re.fullmatch(rf"(?P<name>.+?)\s+(?P<amount>{_LEGACY_AMOUNT})", text)
+    if not match:
+        return None
+    name = match.group("name").strip()
+    amount_source = match.group("amount").strip()
+    amount, amount_max, amount_text, unit, note = _legacy_amount(amount_source)
+    return {
+        "amount": amount,
+        "amount_max": amount_max,
+        "amount_text": amount_text,
+        "unit": unit[:30],
+        "name": name[:200],
+        "note": note,
+        "original_text": text[:500],
+    }
+
+
 def _ingredient(raw: Any) -> dict[str, Any] | None:
     if isinstance(raw, str):
         return {
             "amount": None,
+            "amount_max": None,
             "amount_text": "",
             "unit": "",
             "name": raw[:200],
@@ -189,18 +275,64 @@ def _ingredient(raw: Any) -> dict[str, Any] | None:
     display = str(raw.get("display") or raw.get("originalText") or "").strip()
     name = str(food.get("name") or raw.get("note") or display or "材料名未確認").strip()
     amount = _number(raw.get("quantity"))
-    amount_text = str(raw.get("quantity") if raw.get("quantity") is not None else "").strip()
+    if amount is not None and amount <= 0:
+        amount = None
+    amount_text = (
+        str(raw.get("quantity") if raw.get("quantity") is not None else "").strip()
+        if amount is not None
+        else ""
+    )
     note = str(raw.get("note") or "").strip()
     if amount is None and not note:
         note = display or "未確認"
     return {
         "amount": amount,
+        "amount_max": None,
         "amount_text": amount_text[:50],
         "unit": str(unit.get("abbreviation") or unit.get("name") or "")[:30],
         "name": name[:200],
         "note": note[:200],
         "original_text": (display or name)[:500],
     }
+
+
+def _ingredients(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for value in raw:
+        if isinstance(value, dict):
+            food = value.get("food") if isinstance(value.get("food"), dict) else {}
+            candidates = (
+                value.get("display"),
+                value.get("originalText"),
+                food.get("name"),
+                value.get("note"),
+            )
+            for candidate in candidates:
+                normalized = _legacy_ingredients(str(candidate or ""))
+                if normalized:
+                    result.extend(normalized)
+                    break
+            else:
+                quantity = _number(value.get("quantity"))
+                if quantity is None or quantity <= 0:
+                    simple = next(
+                        (
+                            item
+                            for candidate in candidates
+                            if (item := _simple_ingredient(str(candidate or "")))
+                        ),
+                        None,
+                    )
+                    if simple:
+                        result.append(simple)
+                        continue
+                if fallback := _ingredient(value):
+                    result.append(fallback)
+        elif item := _ingredient(value):
+            result.append(item)
+    return result[:200]
 
 
 def _instructions(raw: Any) -> list[str]:
@@ -280,7 +412,7 @@ class MealieReadClient:
         raw = self.transport.request("GET", f"/api/recipes/{quote(recipe_id, safe='')}")
         if not isinstance(raw, dict):
             raise IntegrationError("Mealieの詳細応答が正しくありません")
-        ingredients = [item for value in raw.get("recipeIngredient", []) if (item := _ingredient(value))]
+        ingredients = _ingredients(raw.get("recipeIngredient"))
         servings = _number(raw.get("recipeServings") or raw.get("recipeYield"))
         tags = raw.get("tags", []) if isinstance(raw.get("tags"), list) else []
         extras = raw.get("extras") if isinstance(raw.get("extras"), dict) else {}

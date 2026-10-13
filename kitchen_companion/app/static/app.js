@@ -1,7 +1,7 @@
 const state = {
   recipes: [],
   selected: null,
-  servings: 2,
+  multiplier: 1,
   step: 0,
   timer: null,
   timerEnds: 0,
@@ -115,16 +115,9 @@ function formatNumber(value) {
   return new Intl.NumberFormat("ja-JP", { maximumFractionDigits: 2 }).format(number);
 }
 
-function adjustServings(current, direction) {
-  const value = Number(current);
-  return Math.max(0.5, Math.round((value + direction * 0.5) * 2) / 2);
-}
-
-function formatServings(value) {
-  const number = Number(value);
-  if (Number.isInteger(number)) return formatNumber(number);
-  if (Number.isInteger(number * 2)) return `${Math.round(number * 2)}/2`;
-  return formatNumber(number);
+function adjustMultiplier(current, direction) {
+  const value = Number(current) || 1;
+  return Math.min(10, Math.max(0.5, Math.round((value + direction * 0.5) * 2) / 2));
 }
 
 function formatVideoTimestamp(value) {
@@ -138,10 +131,13 @@ function formatVideoTimestamp(value) {
     : `${String(minutes).padStart(2, "0")}:${seconds}`;
 }
 
-function scaledIngredient(item, base, target, canScale = true) {
+function scaledIngredient(item, multiplier = 1) {
   if (item.amount == null) return item.note || "適量";
-  if (!canScale) return `${formatNumber(item.amount)}${item.unit ? ` ${item.unit}` : ""}`;
-  return `${formatNumber(Number(item.amount) * target / base)}${item.unit ? ` ${item.unit}` : ""}`;
+  const ratio = positiveNumber(multiplier, 1);
+  const minimum = formatNumber(Number(item.amount) * ratio);
+  const maximum = item.amount_max == null ? "" : formatNumber(Number(item.amount_max) * ratio);
+  const amount = maximum ? `${minimum}〜${maximum}` : minimum;
+  return `${amount}${item.unit ? ` ${item.unit}` : ""}`;
 }
 
 function positiveNumber(value, fallback) {
@@ -149,9 +145,10 @@ function positiveNumber(value, fallback) {
   return Number.isFinite(number) && number > 0 ? number : fallback;
 }
 
-function portionGuidance(recipe, servings = state.servings) {
+function portionGuidance(recipe, multiplier = state.multiplier) {
+  if (recipe.servings_confirmed === false) return [];
   const kind = recipe.portion_kind || "standard";
-  const people = positiveNumber(servings, 1);
+  const people = positiveNumber(recipe.servings, 1) * positiveNumber(multiplier, 1);
   const guidance = [];
   if (["meat_main", "mixed_meat"].includes(kind)) {
     const defaultGrams = kind === "meat_main" ? 200 : 150;
@@ -231,7 +228,7 @@ function renderGrid() {
   grid.innerHTML = recipes.map((recipe) => {
     const image = safeUrl(recipe.image_url);
     const media = image ? `<img src="${escapeHtml(image)}" alt="" loading="lazy">` : '<div class="placeholder">♨</div>';
-    const servingLabel = recipe.servings_confirmed === false ? "人数未確認" : `${formatServings(recipe.servings)}人分`;
+    const servingLabel = "基準量（1倍）";
     const sourceLabel = ["mealie", "mealie_mock"].includes(recipe.source_kind)
       ? (recipe.source_kind === "mealie_mock" ? "Mealieモック" : "Mealie")
       : recipe.video_url ? "動画URL" : recipe.source_url ? "Web URL" : "手入力";
@@ -246,7 +243,7 @@ function renderGrid() {
 function openDetail(recipe) {
   setMode("assist", false);
   state.selected = recipe;
-  state.servings = recipe.servings;
+  state.multiplier = 1;
   state.quantityMode = "recipe";
   renderDetail();
   $("#homeView").classList.add("hidden");
@@ -284,7 +281,6 @@ function renderDetail() {
   const source = safeUrl(recipe.source_url);
   const video = safeUrl(recipe.video_url);
   const embeddedVideo = videoEmbedUrl(recipe.video_url);
-  const servingsConfirmed = recipe.servings_confirmed !== false;
   const guidance = portionGuidance(recipe);
   if (!guidance.length) state.quantityMode = "recipe";
   const showingGuidance = state.quantityMode === "guidance";
@@ -298,24 +294,27 @@ function renderDetail() {
   const deleteControl = recipe.read_only
     ? '<p class="delete-guidance">このレシピを削除する場合はMealie側で削除し、一覧の「更新」を押してください。</p>'
     : '<button class="danger-button" data-action="delete-current">ローカル下書きを削除</button>';
+  const normalizeButton = recipe.read_only && recipe.source_kind === "mealie" && state.runtime?.mealie_sync_enabled
+    ? '<button class="secondary-button" data-action="normalize-current">正規化してMealieへ反映</button>'
+    : "";
   $("#detailView").innerHTML = `
     <button class="back-button" data-action="home">← レシピ一覧</button>
     <div class="detail-hero">
       <div class="detail-image">${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(recipe.title)}">` : ""}</div>
       <div class="detail-copy"><p class="eyebrow">READY TO COOK</p><h1>${escapeHtml(recipe.title)}</h1><p>${escapeHtml(recipe.description)}</p>
-        <div class="serving-control">${servingsConfirmed ? `<button data-serving="-1" aria-label="人数を減らす">−</button><strong>${formatServings(state.servings)}人分</strong><button data-serving="1" aria-label="人数を増やす">＋</button>` : "<strong>人数・換算は未確認</strong>"}</div>
+        <div class="serving-control"><button data-multiplier="-1" aria-label="倍率を下げる">−</button><strong>${formatNumber(state.multiplier)}倍</strong><button data-multiplier="1" aria-label="倍率を上げる">＋</button></div>
         <div class="quantity-mode" aria-label="分量の表示方法">
           <button class="${showingGuidance ? "" : "active"}" data-quantity-mode="recipe" aria-pressed="${!showingGuidance}">メニューの分量</button>
           <button class="${showingGuidance ? "active" : ""}" data-quantity-mode="guidance" aria-pressed="${showingGuidance}" ${guidance.length ? "" : "disabled"}>1人分の適量</button>
         </div>
-        <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button><button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button>${syncButton}${deleteControl}</div>
+        <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button><button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button>${normalizeButton}${syncButton}${deleteControl}</div>
       </div>
     </div>
     ${embeddedVideo ? `<section class="video-panel"><div class="video-frame"><iframe src="${escapeHtml(embeddedVideo)}" title="${escapeHtml(recipe.title)}の料理動画" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div><a class="source-link" href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">動画を別画面で開く</a></section>` : ""}
     <div class="recipe-columns"><section><p class="eyebrow">${showingGuidance ? "PORTION GUIDE" : "INGREDIENTS"}</p><h2>${showingGuidance ? "1人分の適量から計算" : "メニュー（レシピ）の分量"}</h2>
       ${showingGuidance ? '<p class="quantity-note">一般的な適量の目安です。レシピに記載された分量とは別に表示しています。</p>' : ""}
       <ul class="ingredient-list">
-      ${(showingGuidance ? guidance : recipe.ingredients.map((item) => ({ ...item, amount_label: scaledIngredient(item, recipe.servings, state.servings, servingsConfirmed) }))).map((item) => `<li><span>${escapeHtml(item.name)}${item.note ? `<small> ${escapeHtml(item.note)}</small>` : ""}</span><strong>${escapeHtml(item.amount_label || item.amount)}</strong></li>`).join("")}
+      ${(showingGuidance ? guidance : recipe.ingredients.map((item) => ({ ...item, amount_label: scaledIngredient(item, state.multiplier) }))).map((item) => `<li><span>${escapeHtml(item.name)}${item.note ? `<small> ${escapeHtml(item.note)}</small>` : ""}</span><strong>${escapeHtml(item.amount_label || item.amount)}</strong></li>`).join("")}
       </ul>${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">出典ページを開く</a>` : ""}${video && !embeddedVideo ? `<br><a class="source-link" href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">動画を開く</a>` : ""}</section>
       <section><p class="eyebrow">DIRECTIONS</p><h2>作り方</h2><ol class="steps-list">${recipe.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section></div>`;
 }
@@ -334,6 +333,35 @@ async function deleteCurrentRecipe() {
     goHome();
     showToast("ローカル下書きを削除しました");
   } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function normalizeCurrentRecipe(button) {
+  const recipe = state.selected;
+  if (!recipe || !recipe.read_only || recipe.source_kind !== "mealie") return;
+  if (!window.confirm(`「${recipe.title}」の材料を正規化し、Mealieの既存レシピへ反映しますか？`)) return;
+  button.disabled = true;
+  let draft = null;
+  try {
+    draft = await api(`/api/catalog/recipes/${encodeURIComponent(recipe.id)}/normalize`, {
+      method: "POST",
+    });
+    await api("/api/mealie/sync", {
+      method: "POST",
+      body: JSON.stringify({ recipe_id: draft.id }),
+    });
+    await loadRecipes($("#searchInput").value);
+    const normalized = state.recipes.find((item) => item.id === recipe.id);
+    if (normalized) openDetail(normalized);
+    showToast("正規化した内容をMealieへ反映しました");
+  } catch (error) {
+    button.disabled = false;
+    if (draft) {
+      await loadRecipes($("#searchInput").value).catch(() => {});
+      const savedDraft = state.recipes.find((item) => item.id === draft.id);
+      if (savedDraft) openDetail(savedDraft);
+    }
     showToast(error.message);
   }
 }
@@ -367,12 +395,18 @@ function parseIngredientLine(line) {
   const parts = line.split("|").map((part) => part.trim());
   if (parts.length >= 3) {
     const amountText = parts[0];
-    const fraction = amountText.match(/^(\d+)\s*\/\s*(\d+)$/);
-    const amount = fraction && Number(fraction[2]) !== 0
-      ? Number(fraction[1]) / Number(fraction[2])
-      : Number(amountText);
+    const range = amountText.split(/[〜～~-]/).map((value) => value.trim());
+    const parseAmount = (value) => {
+      const fraction = value.match(/^(\d+)\s*\/\s*(\d+)$/);
+      return fraction && Number(fraction[2]) !== 0
+        ? Number(fraction[1]) / Number(fraction[2])
+        : Number(value);
+    };
+    const amount = parseAmount(range[0]);
+    const amountMax = range.length === 2 ? parseAmount(range[1]) : null;
     return {
       amount: Number.isFinite(amount) ? amount : null,
+      amount_max: Number.isFinite(amountMax) && amountMax >= amount ? amountMax : null,
       amount_text: amountText,
       unit: parts[1],
       name: parts.slice(2).join(" | "),
@@ -380,7 +414,7 @@ function parseIngredientLine(line) {
       original_text: line,
     };
   }
-  return { amount: null, amount_text: "", unit: "", name: line.trim(), note: "", original_text: line };
+  return { amount: null, amount_max: null, amount_text: "", unit: "", name: line.trim(), note: "", original_text: line };
 }
 
 function updatePortionFields(applyDefaults = false) {
@@ -767,11 +801,10 @@ function preparationItems() {
       amount: item.amount,
     }));
   }
-  const canScale = recipe.servings_confirmed !== false;
   return recipe.ingredients.map((item) => ({
     name: item.name,
     note: item.note || "",
-    amount: scaledIngredient(item, recipe.servings, state.servings, canScale),
+    amount: scaledIngredient(item, state.multiplier),
   }));
 }
 
@@ -1009,7 +1042,10 @@ document.addEventListener("click", (event) => {
     if (recipe) openDetail(recipe);
   }
   if (target.dataset.query != null) { $("#searchInput").value = target.dataset.query; loadRecipes(target.dataset.query); }
-  if (target.dataset.serving) { state.servings = adjustServings(state.servings, Number(target.dataset.serving)); renderDetail(); }
+  if (target.dataset.multiplier) {
+    state.multiplier = adjustMultiplier(state.multiplier, Number(target.dataset.multiplier));
+    renderDetail();
+  }
   if (target.dataset.quantityMode) {
     state.quantityMode = target.dataset.quantityMode;
     renderDetail();
@@ -1027,6 +1063,7 @@ document.addEventListener("click", (event) => {
     "open-editor": () => openEditor(null, target.dataset.kind === "video"),
     "close-editor": () => $("#editorDialog").close(),
     "edit-current": () => openEditor(state.selected.read_only ? { ...state.selected, id: "" } : state.selected),
+    "normalize-current": () => normalizeCurrentRecipe(target),
     "sync-mealie": () => syncCurrentRecipe(target),
     "delete-current": deleteCurrentRecipe,
     "refresh-recipes": () => loadRecipes($("#searchInput").value).catch((error) => showToast(error.message)),

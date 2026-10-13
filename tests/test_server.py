@@ -30,6 +30,7 @@ from app.server import (  # noqa: E402
     JsonLdParser,
     RecipeStore,
     assert_public_host,
+    create_normalized_draft,
     extract_description_recipe,
     extract_video_url,
     find_recipe_node,
@@ -160,6 +161,61 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(ingredient["amount"], 0.5)
         self.assertEqual(ingredient["amount_text"], "1/2")
         self.assertEqual(ingredient["original_text"], "架空野菜 1/2個")
+
+    def test_normalized_mealie_draft_is_reused_and_updates_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            mealie_recipe = {
+                "title": "架空の正規化レシピ",
+                "servings": 2,
+                "servings_confirmed": True,
+                "ingredients": [
+                    {
+                        "amount": 4,
+                        "amount_max": 5,
+                        "amount_text": "4〜5",
+                        "unit": "個",
+                        "name": "架空食材",
+                    }
+                ],
+                "steps": ["架空の工程。"],
+            }
+            draft = create_normalized_draft(store, mealie_recipe, "fictional-recipe")
+            store.save({**draft, "title": "確認済みの下書き"}, draft["id"])
+
+            reused = create_normalized_draft(store, mealie_recipe, "fictional-recipe")
+            sync_state, slug, _ = store.begin_mealie_sync(draft["id"], "fingerprint")
+
+            self.assertEqual(reused["id"], draft["id"])
+            self.assertEqual(reused["title"], "確認済みの下書き")
+            self.assertEqual(reused["ingredients"][0]["amount_max"], 5)
+            self.assertEqual(sync_state, "update")
+            self.assertEqual(slug, "fictional-recipe")
+
+            store.finish_mealie_sync(draft["id"], {"slug": "fictional-recipe"})
+            refreshed = create_normalized_draft(
+                store,
+                {**mealie_recipe, "title": "再取り込み後の正規化レシピ"},
+                "fictional-recipe",
+            )
+            self.assertEqual(refreshed["id"], draft["id"])
+            self.assertEqual(refreshed["title"], "再取り込み後の正規化レシピ")
+
+    def test_normalized_mealie_draft_requires_confirmed_servings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            with self.assertRaisesRegex(ValueError, "基準人数"):
+                create_normalized_draft(
+                    store,
+                    {
+                        "title": "架空の人数未確認レシピ",
+                        "servings": 1,
+                        "servings_confirmed": False,
+                        "ingredients": [],
+                        "steps": [],
+                    },
+                    "fictional-recipe",
+                )
 
     def test_video_timestamp_accepts_clock_formats(self) -> None:
         self.assertEqual(parse_video_timestamp("01:30"), 90)
@@ -375,7 +431,8 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(recipes[0]["portion_kind"], "drink")
         self.assertEqual(recipes[0]["serving_volume_ml"], 300)
         self.assertEqual(recipes[0]["step_video_timestamps"], [12])
-        self.assertEqual(recipes[0]["ingredients"][0]["note"], "架空の香辛料 適量")
+        self.assertEqual(recipes[0]["ingredients"][0]["name"], "架空の香辛料")
+        self.assertEqual(recipes[0]["ingredients"][0]["note"], "適量")
         self.assertEqual(
             recipes[0]["ingredients"][0]["original_text"], "架空の香辛料 適量"
         )
@@ -385,6 +442,52 @@ class RecipeTests(unittest.TestCase):
         )
         self.assertEqual([call["method"] for call in transport.calls], ["GET", "GET"])
         self.assertEqual(transport.calls[0]["query"]["search"], "スープ")
+
+    def test_mealie_client_normalizes_concatenated_ingredients(self) -> None:
+        repeated_tea = "架空紅茶（種類A、または種類B） ...ティースプーン4〜5杯分"
+        transport = RecordingTransport(
+            [{
+                "slug": "fictional-tea",
+                "name": "架空チャイ",
+                "recipeServings": 2,
+                "recipeIngredient": [
+                    {
+                        "quantity": 0,
+                        "food": {"name": repeated_tea},
+                        "note": repeated_tea,
+                        "display": f"{repeated_tea} {repeated_tea}",
+                    },
+                    {
+                        "quantity": 0,
+                        "food": {"name": "架空香辛料...4個 架空の水...400ml"},
+                        "note": "架空香辛料...4個 架空の水...400ml",
+                    },
+                    {
+                        "quantity": 0,
+                        "food": {"name": "架空の牛乳...400ml 架空の砂糖...適量"},
+                    },
+                ],
+                "recipeInstructions": [],
+            }]
+        )
+
+        recipe = MealieReadClient(transport).get("fictional-tea")
+
+        self.assertIsNotNone(recipe)
+        assert recipe is not None
+        self.assertEqual(
+            [item["name"] for item in recipe["ingredients"]],
+            ["架空紅茶（種類A、または種類B）", "架空香辛料", "架空の水", "架空の牛乳", "架空の砂糖"],
+        )
+        tea = recipe["ingredients"][0]
+        self.assertEqual(tea["amount"], 4)
+        self.assertEqual(tea["amount_max"], 5)
+        self.assertEqual(tea["amount_text"], "4〜5")
+        self.assertEqual(tea["unit"], "ティースプーン")
+        self.assertEqual(recipe["ingredients"][2]["amount"], 400)
+        self.assertEqual(recipe["ingredients"][2]["unit"], "ml")
+        self.assertIsNone(recipe["ingredients"][4]["amount"])
+        self.assertEqual(recipe["ingredients"][4]["note"], "適量")
 
     def test_mealie_sync_client_creates_then_patches_recipe(self) -> None:
         transport = RecordingTransport(["fictional-soup", {"slug": "fictional-soup"}])
