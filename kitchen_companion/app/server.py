@@ -67,6 +67,7 @@ class RecipeStore:
                     title TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
                     servings REAL NOT NULL DEFAULT 2 CHECK (servings > 0),
+                    servings_confirmed INTEGER NOT NULL DEFAULT 1,
                     source_url TEXT NOT NULL DEFAULT '',
                     video_url TEXT NOT NULL DEFAULT '',
                     image_url TEXT NOT NULL DEFAULT '',
@@ -120,6 +121,7 @@ class RecipeStore:
                 "rice_go_per_person": "REAL NOT NULL DEFAULT 0",
                 "origin_mealie_slug": "TEXT NOT NULL DEFAULT ''",
                 "step_video_timestamps_json": "TEXT NOT NULL DEFAULT '[]'",
+                "servings_confirmed": "INTEGER NOT NULL DEFAULT 1",
             }
             for column, definition in migrations.items():
                 if column not in columns:
@@ -158,6 +160,7 @@ class RecipeStore:
             "ingredients_json", "steps_json", "step_video_timestamps_json", "tags_json"
         ):
             result[key.removesuffix("_json")] = json.loads(result.pop(key))
+        result["servings_confirmed"] = bool(result["servings_confirmed"])
         result["source_kind"] = "draft"
         result["read_only"] = False
         return result
@@ -213,15 +216,18 @@ class RecipeStore:
         with self.connect() as db:
             db.execute(
                 """INSERT INTO recipes
-                   (id, title, description, servings, source_url, video_url, image_url,
+                   (id, title, description, servings, servings_confirmed,
+                    source_url, video_url, image_url,
                     portion_kind, serving_volume_ml, dilution_concentrate_parts,
                     dilution_mixer_parts, meat_g_per_person, rice_go_per_person,
                     ingredients_json, steps_json, step_video_timestamps_json,
                     tags_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title, description=excluded.description,
-                    servings=excluded.servings, source_url=excluded.source_url,
+                    servings=excluded.servings,
+                    servings_confirmed=excluded.servings_confirmed,
+                    source_url=excluded.source_url,
                     video_url=excluded.video_url, image_url=excluded.image_url,
                     portion_kind=excluded.portion_kind,
                     serving_volume_ml=excluded.serving_volume_ml,
@@ -239,6 +245,7 @@ class RecipeStore:
                     recipe["title"],
                     recipe["description"],
                     recipe["servings"],
+                    int(recipe["servings_confirmed"]),
                     recipe["source_url"],
                     recipe["video_url"],
                     recipe["image_url"],
@@ -491,6 +498,9 @@ def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("人数を正しく入力してください") from exc
     if not 0 < servings <= 100:
         raise ValueError("人数は0より大きく100以下にしてください")
+    servings_confirmed = raw.get("servings_confirmed", True)
+    if not isinstance(servings_confirmed, bool):
+        raise ValueError("基準人数の確認状態が正しくありません")
     portion_kind = str(raw.get("portion_kind") or "standard")
     portion_kinds = {"standard", "meat_main", "mixed_meat", "drink", "diluted_drink"}
     if portion_kind not in portion_kinds:
@@ -583,6 +593,7 @@ def validate_recipe(raw: dict[str, Any]) -> dict[str, Any]:
         "title": title,
         "description": str(raw.get("description", "")).strip()[:2000],
         "servings": servings,
+        "servings_confirmed": servings_confirmed,
         "source_url": safe_http_url(raw.get("source_url", ""), allow_empty=True),
         "video_url": safe_http_url(raw.get("video_url", ""), allow_empty=True),
         "image_url": safe_image_url(raw.get("image_url", "")),
@@ -725,8 +736,6 @@ def _review_bundle_payload(
     for index, raw_recipe in enumerate(recipes, start=1):
         if not isinstance(raw_recipe, dict):
             raise ValueError(f"{index}件目のレシピ形式が正しくありません")
-        if raw_recipe.get("servings_confirmed") is not True:
-            raise ValueError(f"{index}件目の基準人数が確認済みではありません")
         recipe = validate_recipe(raw_recipe)
         identity = canonical_recipe_source(recipe)
         if not identity:
@@ -735,6 +744,8 @@ def _review_bundle_payload(
         if not isinstance(unresolved, list):
             raise ValueError(f"{index}件目の未確認項目の形式が正しくありません")
         unresolved = [str(item)[:300] for item in unresolved[:20] if str(item).strip()]
+        if not recipe["servings_confirmed"] and not any("基準人数" in item for item in unresolved):
+            unresolved.insert(0, "基準人数は未確認")
         if unresolved:
             review_note = f"未確認項目: {'／'.join(unresolved)}"
             recipe["description"] = "\n\n".join(
@@ -746,6 +757,7 @@ def _review_bundle_payload(
             "title": recipe["title"],
             "source_url": recipe["video_url"] or recipe["source_url"],
             "servings": recipe["servings"],
+            "servings_confirmed": recipe["servings_confirmed"],
             "ingredient_count": len(recipe["ingredients"]),
             "step_count": len(recipe["steps"]),
             "unresolved_fields": unresolved,
@@ -1366,6 +1378,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 recipe = self.store.get(recipe_id)
                 if not recipe:
                     self.json_response({"error": "同期する下書きが見つかりません"}, 404)
+                    return
+                if not recipe["servings_confirmed"]:
+                    self.json_response(
+                        {"error": "基準人数を確認してからMealieへ同期してください"},
+                        409,
+                    )
                     return
                 fingerprint = hashlib.sha256(
                     json.dumps(

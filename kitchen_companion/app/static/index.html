@@ -138,6 +138,7 @@
       <div class="form-grid">
         <label class="wide">料理名<input id="titleField" required maxlength="160" placeholder="例：トマトと卵の炒めもの"></label>
         <label>元レシピの基準人数 <small>この分量全体を換算画面では1倍として扱います</small><input id="servingsField" type="number" min="0.5" max="100" step="0.5" value="2" required></label>
+        <label><span>人数の確認状態</span><small>未確認のまま保存できますが、Mealie同期と人数換算はできません</small><span><input id="servingsConfirmedField" type="checkbox" checked> 基準人数を確認済み</span></label>
         <label>タグ<input id="tagsField" placeholder="中華, 20分, 卵"></label>
         <label>1人分の適量タイプ <small>レシピ記載量とは別に保存します</small><select id="portionKindField"><option value="standard">適量ガイドなし</option><option value="meat_main">肉が主役（200g／人）</option><option value="mixed_meat">肉入り料理（150g／人）</option><option value="drink">ドリンク（300ml／人）</option><option value="diluted_drink">希釈ドリンク（3:7）</option></select></label>
         <label data-portion-field="meat">肉の適量（g／人）<input id="meatPerPersonField" type="number" min="0" max="1000" step="5" value="200"></label>

@@ -134,13 +134,31 @@ class RecipeTests(unittest.TestCase):
             self.assertEqual(review["counts"]["duplicate"], 1)
             self.assertEqual(review["entries"][0]["duplicate_title"], "既存の架空レシピ")
 
-    def test_review_bundle_requires_confirmed_servings(self) -> None:
+    def test_review_bundle_saves_unconfirmed_servings_for_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RecipeStore(Path(directory) / "recipes.sqlite3")
             catalog = CombinedRecipeCatalog(MockMealieCatalog(MOCK_MEALIE_FIXTURE), store)
             recipe = {**self.reviewed_bundle_recipe(), "servings_confirmed": False}
-            with self.assertRaisesRegex(ValueError, "基準人数"):
-                preview_review_bundle({"recipes": [recipe]}, catalog)
+            review = preview_review_bundle({"recipes": [recipe]}, catalog)
+
+            self.assertFalse(review["entries"][0]["servings_confirmed"])
+            self.assertEqual(review["entries"][0]["unresolved_fields"][0], "基準人数は未確認")
+            self.assertIn("火加減は未確認", review["entries"][0]["unresolved_fields"])
+
+            result = save_review_bundle(
+                {
+                    "recipes": [recipe],
+                    "review_token": review["review_token"],
+                    "confirm_count": 1,
+                },
+                catalog,
+                store,
+            )
+
+            self.assertEqual(result["saved_count"], 1)
+            saved = next(item for item in store.list() if item["title"] == recipe["title"])
+            self.assertFalse(saved["servings_confirmed"])
+            self.assertIn("要確認", saved["tags"])
 
     def test_reviewed_bundle_save_requires_matching_preview_and_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
