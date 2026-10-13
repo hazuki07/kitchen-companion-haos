@@ -26,6 +26,10 @@ const state = {
   bundleImport: null,
   quantityMode: "recipe",
   cookTab: "step",
+  shoppingSuggestions: [],
+  shoppingSelectedId: "",
+  shoppingMultiplier: 1,
+  pantryIngredients: new Set(),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -150,6 +154,161 @@ function positiveNumber(value, fallback) {
   return Number.isFinite(number) && number > 0 ? number : fallback;
 }
 
+const SHOPPING_MOODS = [
+  { triggers: ["がっつり", "ボリューム", "お腹いっぱい", "元気", "スタミナ", "こってり"], terms: ["肉", "牛", "豚", "鶏", "揚げ", "丼", "カレー"] },
+  { triggers: ["さっぱり", "あっさり", "暑い", "食欲がない"], terms: ["魚", "野菜", "サラダ", "酢", "レモン", "冷", "和風"] },
+  { triggers: ["温かい", "あたたかい", "暖かい", "寒い"], terms: ["スープ", "鍋", "煮", "汁", "シチュー", "麺"] },
+  { triggers: ["野菜", "ヘルシー", "軽い"], terms: ["野菜", "サラダ", "にんじん", "玉ねぎ", "キャベツ", "トマト"] },
+  { triggers: ["手軽", "簡単", "早い", "時短", "疲れた", "楽したい", "忙しい"], terms: ["簡単", "時短", "20分", "炒め", "丼"] },
+  { triggers: ["辛い", "スパイシー"], terms: ["辛", "カレー", "唐辛子", "キムチ", "麻婆"] },
+];
+
+function normalizedShoppingText(value) {
+  return String(value || "").normalize("NFKC").toLowerCase().replace(/\s+/g, "");
+}
+
+const PANTRY_STORAGE_KEY = "kitchen-companion:pantry-ingredients";
+
+function loadPantryIngredients() {
+  try {
+    const values = JSON.parse(localStorage.getItem(PANTRY_STORAGE_KEY) || "[]");
+    return new Set(Array.isArray(values) ? values.filter((value) => typeof value === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function savePantryIngredients() {
+  try {
+    localStorage.setItem(PANTRY_STORAGE_KEY, JSON.stringify([...state.pantryIngredients].sort()));
+  } catch {
+    showToast("在庫チェックを端末へ保存できませんでした");
+  }
+}
+
+function shoppingIngredientKey(item) {
+  return normalizedShoppingText(item.name);
+}
+
+state.pantryIngredients = loadPantryIngredients();
+
+function shoppingTerms(mood) {
+  const normalized = normalizedShoppingText(mood);
+  const terms = new Set(
+    String(mood || "").normalize("NFKC").toLowerCase().split(/[\s、。・,]+/).filter((term) => term.length >= 2),
+  );
+  SHOPPING_MOODS.forEach((group) => {
+    if (group.triggers.some((trigger) => normalized.includes(trigger))) {
+      group.terms.forEach((term) => terms.add(term));
+    }
+  });
+  return [...terms].map(normalizedShoppingText).filter(Boolean);
+}
+
+function rankShoppingRecipes(recipes, mood) {
+  const terms = shoppingTerms(mood);
+  return recipes
+    .filter((recipe) => recipe.ingredients?.length)
+    .map((recipe) => {
+      const title = normalizedShoppingText(recipe.title);
+      const description = normalizedShoppingText(recipe.description);
+      const tags = (recipe.tags || []).map(normalizedShoppingText);
+      const ingredients = (recipe.ingredients || []).map((item) => normalizedShoppingText(item.name));
+      let score = 0;
+      const reasons = [];
+      terms.forEach((term) => {
+        if (title.includes(term)) { score += 8; reasons.push(`料理名：${term}`); }
+        if (tags.some((tag) => tag.includes(term))) { score += 5; reasons.push(`タグ：${term}`); }
+        if (ingredients.some((name) => name.includes(term))) { score += 4; reasons.push(`材料：${term}`); }
+        if (description.includes(term)) { score += 2; reasons.push(`特徴：${term}`); }
+      });
+      return { recipe, score, reasons: [...new Set(reasons)].slice(0, 3) };
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.recipe.title.localeCompare(right.recipe.title, "ja"))
+    .slice(0, 5);
+}
+
+function selectedShoppingRecipe() {
+  return state.shoppingSuggestions.find((item) => item.recipe.id === state.shoppingSelectedId)?.recipe || null;
+}
+
+function renderShoppingSuggestions() {
+  const element = $("#shoppingSuggestions");
+  if (!state.shoppingSuggestions.length) {
+    element.innerHTML = '<div class="empty-state"><strong>近いレシピが見つかりませんでした</strong><p>「鶏肉」「温かい」「簡単」など、別の言葉でも試してください。</p></div>';
+    renderShoppingList();
+    return;
+  }
+  element.innerHTML = state.shoppingSuggestions.map(({ recipe, reasons }, index) => `
+    <article class="shopping-suggestion ${recipe.id === state.shoppingSelectedId ? "selected" : ""}">
+      <div><h3>${index + 1}. ${escapeHtml(recipe.title)}</h3><p>${escapeHtml(recipe.description || "保存済みレシピから提案しました")}</p></div>
+      <div class="tags">${(reasons.length ? reasons : ["保存済みレシピ"]).map((reason) => `<span class="tag">${escapeHtml(reason)}</span>`).join("")}</div>
+      <button class="secondary-button" data-shopping-select="${escapeHtml(recipe.id)}">材料を見る</button>
+    </article>`).join("");
+  renderShoppingList();
+}
+
+function renderShoppingList() {
+  const element = $("#shoppingList");
+  const recipe = selectedShoppingRecipe();
+  if (!recipe) {
+    element.innerHTML = '<p class="eyebrow">SHOPPING LIST</p><h2>必要な材料</h2><p>候補を選ぶと買い物リストを表示します。</p>';
+    return;
+  }
+  const remaining = recipe.ingredients.filter((item) => !state.pantryIngredients.has(shoppingIngredientKey(item)));
+  const ingredients = recipe.ingredients.map((item, index) => {
+    const key = shoppingIngredientKey(item);
+    const checked = state.pantryIngredients.has(key);
+    return `<li class="${checked ? "checked" : ""}"><input type="checkbox" id="shoppingItem${index}" data-pantry-key="${escapeHtml(key)}" ${checked ? "checked" : ""}><label for="shoppingItem${index}">${escapeHtml(item.name)}</label><strong>${escapeHtml(scaledIngredient(item, state.shoppingMultiplier))}</strong></li>`;
+  }).join("");
+  element.innerHTML = `
+    <p class="eyebrow">SHOPPING LIST</p>
+    <div class="shopping-list-heading"><h2>${escapeHtml(recipe.title)}</h2>
+      <div class="shopping-multiplier"><button data-shopping-multiplier="-1" aria-label="倍率を下げる">−</button><strong>${formatNumber(state.shoppingMultiplier)}倍</strong><button data-shopping-multiplier="1" aria-label="倍率を上げる">＋</button></div>
+    </div>
+    <p>レシピの基準量を1倍として換算しています。家にある材料はチェックしてください。チェックはこの端末に保存されます。</p>
+    <strong class="shopping-remaining">買い足し ${remaining.length}件</strong>
+    <ul class="shopping-ingredients">${ingredients}</ul>
+    <div class="shopping-list-actions"><button class="primary-button" data-action="announce-shopping">買い足す材料を読み上げる</button><button class="secondary-button" data-action="reset-shopping-pantry">チェックをリセット</button><button class="secondary-button" data-open="${escapeHtml(recipe.id)}">レシピを見る</button></div>`;
+}
+
+function announceShoppingList() {
+  const recipe = selectedShoppingRecipe();
+  if (!recipe) return;
+  const ingredients = recipe.ingredients
+    .filter((item) => !state.pantryIngredients.has(shoppingIngredientKey(item)))
+    .map((item) => `${item.name}、${scaledIngredient(item, state.shoppingMultiplier)}`);
+  speak(ingredients.length
+    ? `${recipe.title}で買い足す材料です。${ingredients.join("。")}。`
+    : `${recipe.title}で買い足す材料はありません。`);
+}
+
+function resetShoppingPantry() {
+  const recipe = selectedShoppingRecipe();
+  if (!recipe) return;
+  recipe.ingredients.forEach((item) => state.pantryIngredients.delete(shoppingIngredientKey(item)));
+  savePantryIngredients();
+  renderShoppingList();
+  showToast("このレシピのチェックをリセットしました");
+}
+
+async function recommendShoppingRecipes(mood) {
+  const value = String(mood || "").trim();
+  if (!value) return;
+  const result = await api("/api/catalog/recipes");
+  state.recipes = result.recipes;
+  state.catalogStatus = result;
+  $("#searchInput").value = "";
+  state.shoppingSuggestions = rankShoppingRecipes(state.recipes, value);
+  state.shoppingSelectedId = state.shoppingSuggestions[0]?.recipe.id || "";
+  state.shoppingMultiplier = 1;
+  renderGrid();
+  renderCatalogStatus();
+  renderShoppingSuggestions();
+  showToast(state.shoppingSuggestions.length ? `${state.shoppingSuggestions.length}件を提案しました` : "近いレシピが見つかりませんでした");
+}
+
 function portionGuidance(recipe, multiplier = state.multiplier) {
   if (recipe.servings_confirmed === false) return [];
   const kind = recipe.portion_kind || "standard";
@@ -267,10 +426,10 @@ function setSourceFilter(source) {
 }
 
 function setMode(mode, focus = true) {
-  state.activeMode = mode === "import" ? "import" : "assist";
-  const importing = state.activeMode === "import";
-  $("#assistView").classList.toggle("hidden", importing);
-  $("#importView").classList.toggle("hidden", !importing);
+  state.activeMode = ["assist", "shopping", "import"].includes(mode) ? mode : "assist";
+  $("#assistView").classList.toggle("hidden", state.activeMode !== "assist");
+  $("#shoppingView").classList.toggle("hidden", state.activeMode !== "shopping");
+  $("#importView").classList.toggle("hidden", state.activeMode !== "import");
   $$('[data-mode]').forEach((button) => {
     const active = button.dataset.mode === state.activeMode;
     button.classList.toggle("active", active);
@@ -1146,6 +1305,19 @@ document.addEventListener("click", (event) => {
     if (recipe) openDetail(recipe);
   }
   if (target.dataset.query != null) { $("#searchInput").value = target.dataset.query; loadRecipes(target.dataset.query); }
+  if (target.dataset.shoppingMood != null) {
+    $("#shoppingMood").value = target.dataset.shoppingMood;
+    recommendShoppingRecipes(target.dataset.shoppingMood).catch((error) => showToast(error.message));
+  }
+  if (target.dataset.shoppingSelect) {
+    state.shoppingSelectedId = target.dataset.shoppingSelect;
+    state.shoppingMultiplier = 1;
+    renderShoppingSuggestions();
+  }
+  if (target.dataset.shoppingMultiplier) {
+    state.shoppingMultiplier = adjustMultiplier(state.shoppingMultiplier, Number(target.dataset.shoppingMultiplier));
+    renderShoppingList();
+  }
   if (target.dataset.multiplier) {
     state.multiplier = adjustMultiplier(state.multiplier, Number(target.dataset.multiplier));
     renderDetail();
@@ -1173,15 +1345,34 @@ document.addEventListener("click", (event) => {
     "delete-current": deleteCurrentRecipe,
     "refresh-recipes": () => loadRecipes($("#searchInput").value).catch((error) => showToast(error.message)),
     "start-cooking": startCooking,
+    "announce-shopping": announceShoppingList,
+    "reset-shopping-pantry": resetShoppingPantry,
     "stop-cooking": () => { disableCookVoice(false); $("#cookMode").classList.add("hidden"); document.body.style.overflow = ""; window.speechSynthesis?.cancel(); },
     "timer-stop": () => stopTimer(),
   };
   actions[target.dataset.action]?.();
 });
 
+document.addEventListener("change", (event) => {
+  const target = event.target.closest("[data-pantry-key]");
+  if (!target) return;
+  if (target.checked) state.pantryIngredients.add(target.dataset.pantryKey);
+  else state.pantryIngredients.delete(target.dataset.pantryKey);
+  savePantryIngredients();
+  renderShoppingList();
+});
+
 $("#searchForm").addEventListener("submit", (event) => { event.preventDefault(); loadRecipes($("#searchInput").value); });
 $("#searchInput").addEventListener("input", (event) => { clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadRecipes(event.target.value), 250); });
 $("#voiceSearch").addEventListener("click", () => setupRecognition($("#voiceSearch"), (text) => { $("#searchInput").value = text; loadRecipes(text); }));
+$("#shoppingForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  recommendShoppingRecipes($("#shoppingMood").value).catch((error) => showToast(error.message));
+});
+$("#shoppingVoice").addEventListener("click", () => setupRecognition($("#shoppingVoice"), (text) => {
+  $("#shoppingMood").value = text;
+  recommendShoppingRecipes(text).catch((error) => showToast(error.message));
+}));
 $("#cookVoice").addEventListener("click", toggleCookVoice);
 document.addEventListener("visibilitychange", () => {
   if (!state.cookVoiceEnabled) return;
@@ -1256,6 +1447,69 @@ function registerWebMcpTools() {
       if (!input || typeof input.query !== "string") throw new Error("queryが必要です");
       const result = await api(`/api/catalog/recipes?q=${encodeURIComponent(input.query)}`);
       return { recipes: result.recipes.map(({ id, title, servings, tags }) => ({ id, title, servings, tags })) };
+    },
+  });
+  registration({
+    name: "suggest_recipes_by_mood",
+    title: "気分からレシピを提案",
+    description: "食べたい気分をもとに登録済みレシピを順位付けします。レシピや在庫は変更しません。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mood: { type: "string", minLength: 1, maxLength: 160 },
+        max_results: { type: "integer", minimum: 1, maximum: 5 },
+      },
+      required: ["mood"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, untrustedContentHint: true },
+    async execute(input) {
+      if (!input || typeof input.mood !== "string") throw new Error("moodが必要です");
+      const result = await api("/api/catalog/recipes");
+      const limit = Math.min(5, Math.max(1, Number(input.max_results) || 3));
+      const suggestions = rankShoppingRecipes(result.recipes, input.mood).slice(0, limit);
+      return {
+        mood: input.mood,
+        suggestions: suggestions.map(({ recipe, reasons }) => ({
+          id: recipe.id,
+          title: recipe.title,
+          reasons,
+          base_quantity: "1倍",
+          ingredient_count: recipe.ingredients.length,
+        })),
+      };
+    },
+  });
+  registration({
+    name: "get_shopping_list",
+    title: "買い足す材料を取得",
+    description: "選択したレシピの倍率換算済み材料を返します。既定では端末で家にあるとチェックした材料を除外します。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recipe_id: { type: "string", minLength: 1, maxLength: 160 },
+        multiplier: { type: "number", minimum: 0.5, maximum: 10 },
+        exclude_pantry: { type: "boolean" },
+      },
+      required: ["recipe_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, untrustedContentHint: true },
+    async execute(input) {
+      if (!input || typeof input.recipe_id !== "string") throw new Error("recipe_idが必要です");
+      const result = await api("/api/catalog/recipes");
+      const recipe = result.recipes.find((item) => item.id === input.recipe_id);
+      if (!recipe) throw new Error("レシピが見つかりません");
+      const multiplier = Math.min(10, Math.max(0.5, Number(input.multiplier) || 1));
+      const excludePantry = input.exclude_pantry !== false;
+      const ingredients = recipe.ingredients
+        .filter((item) => !excludePantry || !state.pantryIngredients.has(shoppingIngredientKey(item)))
+        .map((item) => ({
+          name: item.name,
+          amount: scaledIngredient(item, multiplier),
+          needs_confirmation: item.amount == null && !["適量", "少々", "多めの少々", "ひとつまみ"].includes(String(item.note || "").trim()),
+        }));
+      return { recipe_id: recipe.id, title: recipe.title, multiplier, ingredients };
     },
   });
   registration({

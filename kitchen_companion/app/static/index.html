@@ -18,6 +18,7 @@
       </button>
       <nav class="mode-switcher" aria-label="利用モード">
         <button class="active" data-mode="assist" aria-pressed="true">調理アシスト</button>
+        <button data-mode="shopping" aria-pressed="false">買い物アシスト</button>
         <button data-mode="import" aria-pressed="false">レシピ取り込み</button>
       </nav>
       <div class="top-actions">
@@ -73,6 +74,40 @@
           </aside>
         </div>
         </div>
+
+        <section class="shopping-view hidden" id="shoppingView">
+          <div class="shopping-stage">
+            <p class="eyebrow">SHOPPING ASSISTANT</p>
+            <h1>今日は、どんな気分ですか？</h1>
+            <p>食べたい雰囲気を伝えると、保存済みレシピから候補と必要な材料を案内します。</p>
+            <form class="shopping-prompt" id="shoppingForm">
+              <label class="sr-only" for="shoppingMood">食べたい気分</label>
+              <input id="shoppingMood" type="text" placeholder="例：温かくて野菜が多いもの" autocomplete="off" required>
+              <button type="button" class="voice-button" id="shoppingVoice" aria-label="音声で気分を入力"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4Z"></path><path d="M19 11a7 7 0 0 1-14 0M12 18v4M8 22h8"></path></svg></button>
+              <button class="primary-button" type="submit">候補を提案</button>
+            </form>
+            <div class="mood-chips" aria-label="気分の例">
+              <button data-shopping-mood="がっつり">がっつり</button>
+              <button data-shopping-mood="さっぱり">さっぱり</button>
+              <button data-shopping-mood="温かい">温かい</button>
+              <button data-shopping-mood="野菜たっぷり">野菜たっぷり</button>
+              <button data-shopping-mood="手軽で早い">手軽で早い</button>
+            </div>
+          </div>
+          <div class="shopping-layout">
+            <section>
+              <div class="section-heading"><div><p class="eyebrow">RECOMMENDATIONS</p><h2>おすすめ候補</h2></div></div>
+              <div class="shopping-suggestions" id="shoppingSuggestions" aria-live="polite">
+                <div class="empty-state"><strong>気分を教えてください</strong><p>Mealieとローカル下書きの中から、近いレシピを提案します。</p></div>
+              </div>
+            </section>
+            <aside class="shopping-list-panel" id="shoppingList" aria-live="polite">
+              <p class="eyebrow">SHOPPING LIST</p>
+              <h2>必要な材料</h2>
+              <p>候補を選ぶと買い物リストを表示します。</p>
+            </aside>
+          </div>
+        </section>
 
         <section class="import-view hidden" id="importView">
           <div class="import-heading">
