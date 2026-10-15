@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, Protocol
 
+from .nutrition import with_calorie_estimate
+
 
 class RecipeReader(Protocol):
     def list(self, query: str = "") -> list[dict[str, Any]]: ...
@@ -64,7 +66,8 @@ class CombinedRecipeCatalog:
                 and str(recipe.get("mealie_slug")) in primary_ids
             )
         ]
-        return [*primary, *drafts]
+        return [with_calorie_estimate(recipe) for recipe in [*primary, *drafts]]
 
     def get(self, recipe_id: str) -> dict[str, Any] | None:
-        return self.primary.get(recipe_id) or self.drafts.get(recipe_id)
+        recipe = self.primary.get(recipe_id) or self.drafts.get(recipe_id)
+        return with_calorie_estimate(recipe) if recipe is not None else None
