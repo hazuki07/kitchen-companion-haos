@@ -396,12 +396,38 @@ function renderGrid() {
     const sourceLabel = ["mealie", "mealie_mock"].includes(recipe.source_kind)
       ? (recipe.source_kind === "mealie_mock" ? "Mealieモック" : "Mealie")
       : recipe.video_url ? "動画URL" : recipe.source_url ? "Web URL" : "手入力";
+    const calories = calorieEstimateLabel(recipe);
     return `<article class="recipe-card">
       <div class="recipe-card-image">${media}<span>${servingLabel} · ${recipe.steps.length}工程</span></div>
       <div class="recipe-card-body"><h3>${escapeHtml(recipe.title)}</h3><p>${escapeHtml(recipe.description || "自分のレシピノート")}</p>
+      <div class="card-calories">${calories ? `推定 ${calories} kcal` : "推定カロリー 未算出"}</div>
       <div class="tags"><span class="tag">${sourceLabel}</span>${recipe.tags.slice(0, 2).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
       <button class="card-button" data-open="${recipe.id}">レシピを見る</button></div></article>`;
   }).join("");
+}
+
+function calorieEstimateLabel(recipe, multiplier = 1) {
+  const estimate = recipe?.calorie_estimate;
+  const minimum = Number(estimate?.minimum_kcal);
+  const maximum = Number(estimate?.maximum_kcal);
+  if (!Number.isFinite(minimum) || estimate?.minimum_kcal == null) return "";
+  const scaledMinimum = Math.max(0, Math.round(minimum * multiplier));
+  const scaledMaximum = Number.isFinite(maximum)
+    ? Math.max(scaledMinimum, Math.round(maximum * multiplier))
+    : scaledMinimum;
+  return scaledMinimum === scaledMaximum ? `${scaledMinimum}` : `${scaledMinimum}〜${scaledMaximum}`;
+}
+
+function calorieEstimatePanel(recipe, multiplier) {
+  const estimate = recipe?.calorie_estimate;
+  const label = calorieEstimateLabel(recipe, multiplier);
+  if (!label) {
+    return '<div class="calorie-estimate"><strong>推定カロリー：未算出</strong><small>数量・単位を確認できる材料がありません。</small></div>';
+  }
+  const notes = [`${estimate.estimated_ingredient_count}/${estimate.ingredient_count}材料から概算`];
+  if (estimate.has_unestimated_ingredients) notes.push("算出対象外の材料あり");
+  if (estimate.used_unit_assumptions) notes.push("個・本などは一般的な大きさで換算");
+  return `<div class="calorie-estimate"><strong>${formatNumber(multiplier)}倍の推定：${label} kcal</strong><small>${notes.join(" · ")}</small></div>`;
 }
 
 function openDetail(recipe) {
@@ -469,6 +495,7 @@ function renderDetail() {
       <div class="detail-image">${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(recipe.title)}">` : ""}</div>
       <div class="detail-copy"><p class="eyebrow">READY TO COOK</p><h1>${escapeHtml(recipe.title)}</h1><p>${escapeHtml(recipe.description)}</p>
         ${recipe.servings_confirmed === false ? '<p class="unresolved">基準人数は未確認です。編集画面で人数を確認するとMealieへ同期できます。</p>' : ""}
+        ${calorieEstimatePanel(recipe, state.multiplier)}
         <div class="serving-control"><button data-multiplier="-1" aria-label="倍率を下げる">−</button><strong>${formatNumber(state.multiplier)}倍</strong><button data-multiplier="1" aria-label="倍率を上げる">＋</button></div>
         <div class="quantity-mode" aria-label="分量の表示方法">
           <button class="${showingGuidance ? "" : "active"}" data-quantity-mode="recipe" aria-pressed="${!showingGuidance}">メニューの分量</button>

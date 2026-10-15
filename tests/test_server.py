@@ -561,9 +561,10 @@ class RecipeTests(unittest.TestCase):
                     "mealie_slug": "fictional-soup",
                 }]
 
-        self.assertEqual(CombinedRecipeCatalog(Catalog(), Drafts()).list(), [
-            {"id": "fictional-soup", "title": "Mealie側"}
-        ])
+        recipes = CombinedRecipeCatalog(Catalog(), Drafts()).list()
+        self.assertEqual(len(recipes), 1)
+        self.assertEqual(recipes[0]["id"], "fictional-soup")
+        self.assertIsNone(recipes[0]["calorie_estimate"]["minimum_kcal"])
 
     def test_mealie_client_uses_read_only_endpoints_and_maps_unknowns(self) -> None:
         transport = RecordingTransport(

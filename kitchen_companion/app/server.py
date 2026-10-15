@@ -33,6 +33,7 @@ from .clients import (
     UrllibJsonTransport,
 )
 from .integrations import RuntimeConfig, StageCookingController, StageTimerController
+from .nutrition import with_calorie_estimate
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -163,7 +164,7 @@ class RecipeStore:
         result["servings_confirmed"] = bool(result["servings_confirmed"])
         result["source_kind"] = "draft"
         result["read_only"] = False
-        return result
+        return with_calorie_estimate(result)
 
     def list(self, query: str = "") -> list[dict[str, Any]]:
         with self.connect() as db:
