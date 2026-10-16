@@ -111,6 +111,14 @@ class RecipeTests(unittest.TestCase):
             self.assertEqual(store.get(saved["id"])["portion_kind"], "mixed_meat")
             self.assertEqual(store.get(saved["id"])["rice_go_per_person"], 0.375)
             self.assertEqual(store.get(saved["id"])["step_video_timestamps"], [15])
+            self.assertEqual(
+                store.get(saved["id"])["cooking_time_estimate"]["minimum_minutes"],
+                5,
+            )
+            self.assertEqual(
+                store.get(saved["id"])["cooking_time_estimate"]["maximum_minutes"],
+                12,
+            )
             self.assertEqual([item["id"] for item in store.list("豆")], [saved["id"]])
 
     def test_validation_rejects_bad_servings(self) -> None:
@@ -592,6 +600,7 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(len(recipes), 1)
         self.assertEqual(recipes[0]["id"], "fictional-soup")
         self.assertIsNone(recipes[0]["calorie_estimate"]["minimum_kcal"])
+        self.assertIsNone(recipes[0]["cooking_time_estimate"]["minimum_minutes"])
 
     def test_mealie_client_uses_read_only_endpoints_and_maps_unknowns(self) -> None:
         transport = RecordingTransport(
