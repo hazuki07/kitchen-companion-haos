@@ -26,13 +26,19 @@ from .clients import (
     ExternalIntegrationConfig,
     HomeAssistantCookingClient,
     HomeAssistantTimerClient,
+    HomeAssistantTodoClient,
     IntegrationError,
     MealieImageClient,
     MealieReadClient,
     MealieSyncClient,
     UrllibJsonTransport,
 )
-from .integrations import RuntimeConfig, StageCookingController, StageTimerController
+from .integrations import (
+    RuntimeConfig,
+    StageCookingController,
+    StageTimerController,
+    StageTodoController,
+)
 from .nutrition import with_calorie_estimate
 
 APP_DIR = Path(__file__).resolve().parent
@@ -46,6 +52,59 @@ MAX_REVIEW_BUNDLE = 20
 
 def utc_now() -> str:
     return dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+
+
+def _format_list_number(value: float) -> str:
+    return f"{value:g}"
+
+
+def build_recipe_list_items(
+    recipe: dict[str, Any], kind: str, multiplier: float = 1
+) -> list[str]:
+    if kind not in {"shopping", "tasks"}:
+        raise ValueError("リスト種別が正しくありません")
+    if not 0.25 <= multiplier <= 20:
+        raise ValueError("倍率は0.25倍から20倍で指定してください")
+    if kind == "tasks":
+        steps = [str(step).strip() for step in recipe.get("steps", []) if str(step).strip()]
+        if not steps:
+            raise ValueError("工程が登録されていません")
+        title = str(recipe.get("title") or "レシピ").strip()
+        return [f"{title} — 工程{index}: {step}"[:500] for index, step in enumerate(steps, 1)]
+
+    ingredients = recipe.get("ingredients", [])
+    if not isinstance(ingredients, list) or not ingredients:
+        raise ValueError("材料が登録されていません")
+    result: list[str] = []
+    for ingredient in ingredients[:200]:
+        if not isinstance(ingredient, dict):
+            continue
+        name = str(ingredient.get("name") or "").strip()
+        if not name:
+            continue
+        amount = ingredient.get("amount")
+        amount_max = ingredient.get("amount_max")
+        unit = str(ingredient.get("unit") or "").strip()
+        note = str(ingredient.get("note") or "").strip()
+        quantity = ""
+        if isinstance(amount, (int, float)):
+            low = _format_list_number(float(amount) * multiplier)
+            if isinstance(amount_max, (int, float)):
+                high = _format_list_number(float(amount_max) * multiplier)
+                quantity = f"{low}〜{high}"
+            else:
+                quantity = low
+            if unit:
+                quantity = f"{quantity} {unit}"
+        elif multiplier == 1:
+            quantity = str(ingredient.get("amount_text") or "").strip()
+            if quantity and unit:
+                quantity = f"{quantity} {unit}"
+        details = "・".join(part for part in (quantity, note) if part)
+        result.append(f"{name} — {details}"[:500] if details else name[:500])
+    if not result:
+        raise ValueError("材料が登録されていません")
+    return result
 
 
 class RecipeStore:
@@ -1193,6 +1252,7 @@ class AppHandler(BaseHTTPRequestHandler):
     runtime: RuntimeConfig
     cooking: StageCookingController | HomeAssistantCookingClient
     timer: StageTimerController | HomeAssistantTimerClient
+    todo: StageTodoController | HomeAssistantTodoClient
     images: MealieImageClient | None
     mealie_sync: MealieSyncClient | None
 
@@ -1492,6 +1552,79 @@ class AppHandler(BaseHTTPRequestHandler):
                 result["status"] = "completed"
                 self.store.finish_action(request_id, result)
                 self.json_response(result)
+            elif self.path == "/api/lists/add":
+                data = self.body()
+                request_id = str(data.get("request_id", ""))
+                try:
+                    if str(uuid.UUID(request_id)) != request_id:
+                        raise ValueError
+                except ValueError as exc:
+                    raise ValueError("request IDが正しくありません") from exc
+                kind = str(data.get("kind", ""))
+                enabled = (
+                    self.runtime.public_status().get("shopping_list_enabled")
+                    if kind == "shopping"
+                    else self.runtime.public_status().get("task_list_enabled")
+                    if kind == "tasks"
+                    else False
+                )
+                if not enabled:
+                    label = "買い物リスト" if kind == "shopping" else "タスクリスト"
+                    self.json_response(
+                        {"error": f"{label}のtodo entity IDをApp設定で指定してください"},
+                        409,
+                    )
+                    return
+                recipe = self.catalog.get(str(data.get("recipe_id", "")))
+                if not recipe:
+                    self.json_response({"error": "レシピが見つかりません"}, 404)
+                    return
+                try:
+                    multiplier = float(data.get("multiplier", 1))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("倍率が正しくありません") from exc
+                items = build_recipe_list_items(recipe, kind, multiplier)
+                fingerprint = hashlib.sha256(
+                    json.dumps(
+                        ["list", recipe["id"], kind, multiplier, items],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                action_state, previous = self.store.begin_action(request_id, fingerprint)
+                if action_state == "completed":
+                    self.json_response({**(previous or {}), "replayed": True})
+                    return
+                if action_state in {"pending", "outcome_unknown"}:
+                    self.json_response(
+                        {
+                            "error": "前回のリスト追加結果をHome Assistant側で確認してください",
+                            "request_id": request_id,
+                            "status": action_state,
+                        },
+                        409,
+                    )
+                    return
+                try:
+                    result = self.todo.add(kind, items)
+                except Exception:
+                    self.store.mark_action_unknown(request_id)
+                    self.json_response(
+                        {
+                            "error": "リスト追加結果を確認できないため自動再送を停止しました",
+                            "request_id": request_id,
+                            "status": "outcome_unknown",
+                        },
+                        502,
+                    )
+                    return
+                result.update(
+                    request_id=request_id,
+                    recipe_id=str(recipe["id"]),
+                    status="completed",
+                )
+                self.store.finish_action(request_id, result)
+                self.json_response(result)
             elif self.path == "/api/cooking/action":
                 data = self.body()
                 request_id = str(data.get("request_id", ""))
@@ -1623,6 +1756,7 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
             )
         else:
             timer = StageTimerController()
+        todo: StageTodoController | HomeAssistantTodoClient = StageTodoController()
         images = None
         mealie_sync = None
     else:
@@ -1639,6 +1773,11 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
             UrllibJsonTransport(external.home_assistant_url, os.environ.get("SUPERVISOR_TOKEN", "")),
             external.timer_script_entity_id,
         )
+        todo = HomeAssistantTodoClient(
+            UrllibJsonTransport(external.home_assistant_url, os.environ.get("SUPERVISOR_TOKEN", "")),
+            runtime.shopping_list_entity_id,
+            runtime.task_list_entity_id,
+        )
         images = MealieImageClient(
             UrllibJsonTransport(external.mealie_url, external.mealie_token)
         )
@@ -1652,6 +1791,7 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
             "runtime": runtime,
             "cooking": cooking,
             "timer": timer,
+            "todo": todo,
             "images": images,
             "mealie_sync": mealie_sync,
         },
