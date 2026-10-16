@@ -10,6 +10,8 @@ from typing import Any
 class RuntimeConfig:
     mode: str
     timer_script_entity_id: str = field(default="", repr=False)
+    shopping_list_entity_id: str = field(default="", repr=False)
+    task_list_entity_id: str = field(default="", repr=False)
 
     @classmethod
     def from_environment(cls) -> RuntimeConfig:
@@ -25,7 +27,21 @@ class RuntimeConfig:
             r"script\.[a-z0-9_]+", timer_script_entity_id
         ):
             raise ValueError("prototypeではAlexaタイマー用script entity IDが必要です")
-        return cls(mode=mode, timer_script_entity_id=timer_script_entity_id)
+        shopping_list_entity_id = os.environ.get(
+            "COOKING_ASSISTANT_SHOPPING_LIST_ENTITY_ID", ""
+        ).strip()
+        task_list_entity_id = os.environ.get(
+            "COOKING_ASSISTANT_TASK_LIST_ENTITY_ID", ""
+        ).strip()
+        for entity_id in (shopping_list_entity_id, task_list_entity_id):
+            if entity_id and not re.fullmatch(r"todo\.[a-z0-9_]+", entity_id):
+                raise ValueError("買い物・タスクリストにはtodo entity IDを指定してください")
+        return cls(
+            mode=mode,
+            timer_script_entity_id=timer_script_entity_id,
+            shopping_list_entity_id=shopping_list_entity_id,
+            task_list_entity_id=task_list_entity_id,
+        )
 
     def public_status(self) -> dict[str, Any]:
         if self.mode == "stage":
@@ -36,6 +52,8 @@ class RuntimeConfig:
                 "mealie": "mock_read_only",
                 "speech": "browser",
                 "external_write_enabled": False,
+                "shopping_list_enabled": True,
+                "task_list_enabled": True,
             }
         if self.mode == "prototype":
             return {
@@ -46,6 +64,8 @@ class RuntimeConfig:
                 "speech": "browser",
                 "external_write_enabled": True,
                 "external_write_scope": "timer_only",
+                "shopping_list_enabled": False,
+                "task_list_enabled": False,
             }
         return {
             "mode": self.mode,
@@ -56,6 +76,8 @@ class RuntimeConfig:
             "speech": "home_assistant",
             "external_write_enabled": True,
             "external_write_scope": "home_assistant_and_mealie_manual",
+            "shopping_list_enabled": bool(self.shopping_list_entity_id),
+            "task_list_enabled": bool(self.task_list_entity_id),
         }
 
 
@@ -115,4 +137,22 @@ class StageTimerController:
             "operation": action,
             "minutes": minutes,
             "alert_output": "browser",
+        }
+
+
+class StageTodoController:
+    """実Home Assistantへ接続せずリスト追加の契約を検証する。"""
+
+    KINDS = {"shopping", "tasks"}
+
+    def add(self, kind: str, items: list[str]) -> dict[str, Any]:
+        if kind not in self.KINDS:
+            raise ValueError("リスト種別が正しくありません")
+        if not items:
+            raise ValueError("追加する項目がありません")
+        return {
+            "mode": "stage",
+            "simulated": True,
+            "kind": kind,
+            "added_count": len(items),
         }

@@ -669,3 +669,48 @@ class HomeAssistantTimerClient:
             "minutes": minutes,
             "alert_output": "alexa",
         }
+
+
+class HomeAssistantTodoClient:
+    KINDS = {"shopping", "tasks"}
+
+    def __init__(
+        self,
+        transport: JsonTransport,
+        shopping_list_entity_id: str = "",
+        task_list_entity_id: str = "",
+    ):
+        targets = {
+            "shopping": shopping_list_entity_id,
+            "tasks": task_list_entity_id,
+        }
+        for entity_id in targets.values():
+            if entity_id and not re.fullmatch(r"todo\.[a-z0-9_]+", entity_id):
+                raise ValueError("Home Assistant todo entity IDが正しくありません")
+        self.transport = transport
+        self.targets = targets
+
+    def add(self, kind: str, items: list[str]) -> dict[str, Any]:
+        if kind not in self.KINDS:
+            raise ValueError("リスト種別が正しくありません")
+        entity_id = self.targets[kind]
+        if not entity_id:
+            label = "買い物リスト" if kind == "shopping" else "タスクリスト"
+            raise ValueError(f"{label}のtodo entity IDが設定されていません")
+        if not items or len(items) > 200:
+            raise ValueError("追加する項目数が正しくありません")
+        for item in items:
+            clean_item = str(item).strip()
+            if not clean_item or len(clean_item) > 500:
+                raise ValueError("リスト項目が正しくありません")
+            self.transport.request(
+                "POST",
+                "/api/services/todo/add_item",
+                body={"entity_id": entity_id, "item": clean_item},
+            )
+        return {
+            "mode": "home_assistant",
+            "simulated": False,
+            "kind": kind,
+            "added_count": len(items),
+        }

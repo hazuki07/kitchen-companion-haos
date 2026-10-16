@@ -16,6 +16,7 @@ from app.clients import (  # noqa: E402
     ExternalIntegrationConfig,
     HomeAssistantCookingClient,
     HomeAssistantTimerClient,
+    HomeAssistantTodoClient,
     IntegrationError,
     MealieImageClient,
     MealieReadClient,
@@ -25,12 +26,14 @@ from app.integrations import (  # noqa: E402
     RuntimeConfig,
     StageCookingController,
     StageTimerController,
+    StageTodoController,
 )
 from app.server import (  # noqa: E402
     MOCK_MEALIE_FIXTURE,
     JsonLdParser,
     RecipeStore,
     assert_public_host,
+    build_recipe_list_items,
     create_normalized_draft,
     extract_description_recipe,
     extract_video_url,
@@ -113,6 +116,30 @@ class RecipeTests(unittest.TestCase):
     def test_validation_rejects_bad_servings(self) -> None:
         with self.assertRaisesRegex(ValueError, "人数"):
             validate_recipe({"title": "架空", "servings": 0, "ingredients": [], "steps": []})
+
+    def test_recipe_list_items_scale_ingredients_and_number_tasks(self) -> None:
+        recipe = {
+            "title": "架空の豆料理",
+            "ingredients": [
+                {"name": "豆", "amount": 100, "unit": "g", "note": ""},
+                {"name": "塩", "amount": None, "unit": "", "note": "適量"},
+            ],
+            "steps": ["豆を洗う。", "豆を煮る。"],
+        }
+        self.assertEqual(
+            build_recipe_list_items(recipe, "shopping", 1.5),
+            ["豆 — 150 g", "塩 — 適量"],
+        )
+        self.assertEqual(
+            build_recipe_list_items(recipe, "tasks", 1.5),
+            ["架空の豆料理 — 工程1: 豆を洗う。", "架空の豆料理 — 工程2: 豆を煮る。"],
+        )
+
+    def test_recipe_list_items_reject_missing_source_items(self) -> None:
+        with self.assertRaisesRegex(ValueError, "材料"):
+            build_recipe_list_items({"ingredients": []}, "shopping")
+        with self.assertRaisesRegex(ValueError, "工程"):
+            build_recipe_list_items({"steps": []}, "tasks")
 
     def test_review_bundle_detects_normalized_youtube_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -861,6 +888,51 @@ class RecipeTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "1分から180分"):
             client.perform("start", 0)
+
+    def test_home_assistant_todo_client_adds_each_item_to_configured_list(self) -> None:
+        transport = RecordingTransport([[], []])
+        client = HomeAssistantTodoClient(
+            transport,
+            "todo.fictional_shopping",
+            "todo.fictional_tasks",
+        )
+        result = client.add("shopping", ["架空豆 — 200 g", "架空塩 — 適量"])
+        self.assertEqual(result["added_count"], 2)
+        self.assertEqual(
+            transport.calls,
+            [
+                {
+                    "method": "POST",
+                    "path": "/api/services/todo/add_item",
+                    "query": None,
+                    "body": {
+                        "entity_id": "todo.fictional_shopping",
+                        "item": "架空豆 — 200 g",
+                    },
+                },
+                {
+                    "method": "POST",
+                    "path": "/api/services/todo/add_item",
+                    "query": None,
+                    "body": {
+                        "entity_id": "todo.fictional_shopping",
+                        "item": "架空塩 — 適量",
+                    },
+                },
+            ],
+        )
+
+    def test_home_assistant_todo_client_rejects_missing_or_invalid_target(self) -> None:
+        with self.assertRaisesRegex(ValueError, "todo entity ID"):
+            HomeAssistantTodoClient(RecordingTransport([]), "light.kitchen")
+        client = HomeAssistantTodoClient(RecordingTransport([]))
+        with self.assertRaisesRegex(ValueError, "設定されていません"):
+            client.add("tasks", ["架空工程"])
+
+    def test_stage_todo_controller_never_performs_external_write(self) -> None:
+        result = StageTodoController().add("tasks", ["架空工程"])
+        self.assertTrue(result["simulated"])
+        self.assertEqual(result["added_count"], 1)
 
     def test_external_config_hides_fictional_token_from_repr(self) -> None:
         config_json = {

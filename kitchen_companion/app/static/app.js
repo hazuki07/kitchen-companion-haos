@@ -30,6 +30,7 @@ const state = {
   shoppingSelectedId: "",
   shoppingMultiplier: 1,
   pantryIngredients: new Set(),
+  listOutcomeUnknown: new Set(),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -489,6 +490,16 @@ function renderDetail() {
   const normalizeButton = recipe.read_only && recipe.source_kind === "mealie" && state.runtime?.mealie_sync_enabled
     ? '<button class="secondary-button" data-action="normalize-current">分量を正規化</button>'
     : "";
+  const shoppingKey = `${recipe.id}:shopping`;
+  const taskKey = `${recipe.id}:tasks`;
+  const shoppingBlocked = state.listOutcomeUnknown.has(shoppingKey);
+  const taskBlocked = state.listOutcomeUnknown.has(taskKey);
+  const shoppingButton = `<button class="secondary-button" data-action="add-shopping-list" ${
+    recipe.ingredients?.length && state.runtime?.shopping_list_enabled && !shoppingBlocked ? "" : "disabled"
+  }>${shoppingBlocked ? "買い物リストをHA側で確認" : "買い物リストへ追加"}</button>`;
+  const taskButton = `<button class="secondary-button" data-action="add-task-list" ${
+    recipe.steps?.length && state.runtime?.task_list_enabled && !taskBlocked ? "" : "disabled"
+  }>${taskBlocked ? "タスクリストをHA側で確認" : "タスクリストへ追加"}</button>`;
   $("#detailView").innerHTML = `
     <button class="back-button" data-action="home">← レシピ一覧</button>
     <div class="detail-hero">
@@ -501,7 +512,7 @@ function renderDetail() {
           <button class="${showingGuidance ? "" : "active"}" data-quantity-mode="recipe" aria-pressed="${!showingGuidance}">メニューの分量</button>
           <button class="${showingGuidance ? "active" : ""}" data-quantity-mode="guidance" aria-pressed="${showingGuidance}" ${guidance.length ? "" : "disabled"}>1人分の適量</button>
         </div>
-        <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button><button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button>${normalizeButton}${syncButton}${deleteControl}</div>
+        <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button>${shoppingButton}${taskButton}<button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button>${normalizeButton}${syncButton}${deleteControl}</div>
       </div>
     </div>
     ${embeddedVideo ? `<section class="video-panel"><div class="video-frame"><iframe src="${escapeHtml(embeddedVideo)}" title="${escapeHtml(recipe.title)}の料理動画" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div><a class="source-link" href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">動画を別画面で開く</a></section>` : ""}
@@ -511,6 +522,36 @@ function renderDetail() {
       ${(showingGuidance ? guidance : recipe.ingredients.map((item) => ({ ...item, amount_label: scaledIngredient(item, state.multiplier) }))).map((item) => `<li><span>${escapeHtml(item.name)}${item.note ? `<small> ${escapeHtml(item.note)}</small>` : ""}</span><strong>${escapeHtml(item.amount_label || item.amount)}</strong></li>`).join("")}
       </ul>${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">出典ページを開く</a>` : ""}${video && !embeddedVideo ? `<br><a class="source-link" href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">動画を開く</a>` : ""}</section>
       <section><p class="eyebrow">DIRECTIONS</p><h2>作り方</h2><ol class="steps-list">${recipe.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol></section></div>`;
+}
+
+async function addSelectedRecipeToList(kind, button) {
+  const recipe = state.selected;
+  if (!recipe) return;
+  const label = kind === "shopping" ? "買い物リスト" : "タスクリスト";
+  const key = `${recipe.id}:${kind}`;
+  if (state.listOutcomeUnknown.has(key)) {
+    showToast(`前回の${label}追加結果をHome Assistant側で確認してください`);
+    return;
+  }
+  button.disabled = true;
+  button.textContent = `${label}へ追加中…`;
+  try {
+    const result = await api("/api/lists/add", {
+      method: "POST",
+      body: JSON.stringify({
+        request_id: crypto.randomUUID(),
+        recipe_id: recipe.id,
+        kind,
+        multiplier: state.multiplier,
+      }),
+    });
+    showToast(`${label}へ${result.added_count}件追加しました${result.simulated ? "（Stage）" : ""}`);
+    renderDetail();
+  } catch (error) {
+    if (error.data?.status === "outcome_unknown") state.listOutcomeUnknown.add(key);
+    renderDetail();
+    showToast(error.message);
+  }
 }
 
 async function deleteCurrentRecipe() {
@@ -1410,6 +1451,8 @@ document.addEventListener("click", (event) => {
     "normalize-current": () => normalizeCurrentRecipe(target),
     "verify-mealie": () => verifyMealieSync(target),
     "sync-mealie": () => syncCurrentRecipe(target),
+    "add-shopping-list": () => addSelectedRecipeToList("shopping", target),
+    "add-task-list": () => addSelectedRecipeToList("tasks", target),
     "delete-current": deleteCurrentRecipe,
     "refresh-recipes": () => loadRecipes($("#searchInput").value).catch((error) => showToast(error.message)),
     "start-cooking": startCooking,

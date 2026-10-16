@@ -93,6 +93,12 @@ Alexaタイマーは同じ設定の`timer_script_entity_id`へ`operation`と`min
 Appにはこのディレクトリが読み取り専用でmountされます。tokenをリポジトリ、README、画面、ログへ
 貼り付けないでください。
 
+選択レシピからHome Assistantのリストへ追加する場合は、App設定で
+`shopping_list_entity_id`と`task_list_entity_id`に対象の`todo.*` entity IDを指定します。
+買い物リストには倍率換算した材料、タスクリストには料理名と工程番号を付けた手順が追加されます。
+未設定のリストには書き込みません。複数項目の途中で通信結果が不明になった場合も自動再送しないため、
+Home Assistant側のリストを確認してから再操作してください。
+
 App設定の`mode`は既定で`stage`です。`home_assistant`への変更は、バックアップと読み取り検証が完了し、
 実環境での接続を明示的に承認した後だけ行います。
 
