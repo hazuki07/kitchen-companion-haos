@@ -150,9 +150,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--amber); box-shad
 .detail-copy { padding: clamp(28px, 5vw, 58px); }
 .detail-copy h1 { font-size: clamp(2rem, 4vw, 3.2rem); }
 .detail-copy > p { color: #c5cedd; line-height: 1.7; }
-.calorie-estimate { display: grid; gap: 4px; margin: 18px 0 14px; padding: 13px 15px; border: 1px solid rgba(255,255,255,.14); border-radius: 12px; background: rgba(255,255,255,.08); }
-.calorie-estimate strong { color: #ffd18f; font-size: 1.02rem; }
-.calorie-estimate small { color: #c5cedd; line-height: 1.5; }
+.calorie-estimate, .time-estimate { display: grid; gap: 4px; margin: 18px 0 14px; padding: 13px 15px; border: 1px solid rgba(255,255,255,.14); border-radius: 12px; background: rgba(255,255,255,.08); }
+.calorie-estimate strong, .time-estimate strong { color: #ffd18f; font-size: 1.02rem; }
+.calorie-estimate small, .time-estimate small { color: #c5cedd; line-height: 1.5; }
 .detail-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 25px; }
 .detail-actions button { min-width: 145px; }
 .detail-actions .delete-guidance { flex-basis: 100%; margin: 4px 0 0; color: #aeb9ca; font-size: .82rem; }

@@ -40,6 +40,7 @@ from .integrations import (
     StageTodoController,
 )
 from .nutrition import with_calorie_estimate
+from .timing import with_cooking_time_estimate
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -223,7 +224,7 @@ class RecipeStore:
         result["servings_confirmed"] = bool(result["servings_confirmed"])
         result["source_kind"] = "draft"
         result["read_only"] = False
-        return with_calorie_estimate(result)
+        return with_cooking_time_estimate(with_calorie_estimate(result))
 
     def list(self, query: str = "") -> list[dict[str, Any]]:
         with self.connect() as db:

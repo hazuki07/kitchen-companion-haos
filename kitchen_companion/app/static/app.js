@@ -398,13 +398,46 @@ function renderGrid() {
       ? (recipe.source_kind === "mealie_mock" ? "Mealieモック" : "Mealie")
       : recipe.video_url ? "動画URL" : recipe.source_url ? "Web URL" : "手入力";
     const calories = calorieEstimateLabel(recipe);
+    const cookingTime = cookingTimeEstimateLabel(recipe);
     return `<article class="recipe-card">
       <div class="recipe-card-image">${media}<span>${servingLabel} · ${recipe.steps.length}工程</span></div>
       <div class="recipe-card-body"><h3>${escapeHtml(recipe.title)}</h3><p>${escapeHtml(recipe.description || "自分のレシピノート")}</p>
       <div class="card-calories">${calories ? `推定 ${calories} kcal` : "推定カロリー 未算出"}</div>
+      <div class="card-calories">${cookingTime ? `推定調理時間 ${cookingTime}` : "推定調理時間 未算出"}</div>
       <div class="tags"><span class="tag">${sourceLabel}</span>${recipe.tags.slice(0, 2).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>
       <button class="card-button" data-open="${recipe.id}">レシピを見る</button></div></article>`;
   }).join("");
+}
+
+function cookingTimeValue(minutes) {
+  const value = Math.max(1, Math.ceil(Number(minutes)));
+  if (!Number.isFinite(value)) return "";
+  if (value < 60) return `${value}分`;
+  const hours = Math.floor(value / 60);
+  const remainder = value % 60;
+  return `${hours}時間${remainder ? `${remainder}分` : ""}`;
+}
+
+function cookingTimeEstimateLabel(recipe) {
+  const estimate = recipe?.cooking_time_estimate;
+  if (estimate?.minimum_minutes == null) return "";
+  const minimum = cookingTimeValue(estimate.minimum_minutes);
+  const maximum = cookingTimeValue(estimate.maximum_minutes);
+  if (!minimum) return "";
+  return !maximum || minimum === maximum ? minimum : `${minimum}〜${maximum}`;
+}
+
+function cookingTimeEstimatePanel(recipe) {
+  const estimate = recipe?.cooking_time_estimate;
+  const label = cookingTimeEstimateLabel(recipe);
+  if (!label) {
+    return '<div class="time-estimate"><strong>推定調理時間：未算出</strong><small>工程が登録されていません。</small></div>';
+  }
+  const notes = [];
+  if (estimate.explicit_step_count) notes.push(`時間記載 ${estimate.explicit_step_count}工程`);
+  if (estimate.estimated_step_count) notes.push(`時間未記載 ${estimate.estimated_step_count}工程は作業内容から概算`);
+  notes.push("参考値");
+  return `<div class="time-estimate"><strong>推定調理時間：${label}</strong><small>${notes.join(" · ")}</small></div>`;
 }
 
 function calorieEstimateLabel(recipe, multiplier = 1) {
@@ -507,6 +540,7 @@ function renderDetail() {
       <div class="detail-copy"><p class="eyebrow">READY TO COOK</p><h1>${escapeHtml(recipe.title)}</h1><p>${escapeHtml(recipe.description)}</p>
         ${recipe.servings_confirmed === false ? '<p class="unresolved">基準人数は未確認です。編集画面で人数を確認するとMealieへ同期できます。</p>' : ""}
         ${calorieEstimatePanel(recipe, state.multiplier)}
+        ${cookingTimeEstimatePanel(recipe)}
         <div class="serving-control"><button data-multiplier="-1" aria-label="倍率を下げる">−</button><strong>${formatNumber(state.multiplier)}倍</strong><button data-multiplier="1" aria-label="倍率を上げる">＋</button></div>
         <div class="quantity-mode" aria-label="分量の表示方法">
           <button class="${showingGuidance ? "" : "active"}" data-quantity-mode="recipe" aria-pressed="${!showingGuidance}">メニューの分量</button>

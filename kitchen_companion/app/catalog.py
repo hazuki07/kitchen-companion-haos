@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .nutrition import with_calorie_estimate
+from .timing import with_cooking_time_estimate
+
+
+def with_recipe_estimates(recipe: dict[str, Any]) -> dict[str, Any]:
+    return with_cooking_time_estimate(with_calorie_estimate(recipe))
 
 
 class RecipeReader(Protocol):
@@ -66,8 +71,8 @@ class CombinedRecipeCatalog:
                 and str(recipe.get("mealie_slug")) in primary_ids
             )
         ]
-        return [with_calorie_estimate(recipe) for recipe in [*primary, *drafts]]
+        return [with_recipe_estimates(recipe) for recipe in [*primary, *drafts]]
 
     def get(self, recipe_id: str) -> dict[str, Any] | None:
         recipe = self.primary.get(recipe_id) or self.drafts.get(recipe_id)
-        return with_calorie_estimate(recipe) if recipe is not None else None
+        return with_recipe_estimates(recipe) if recipe is not None else None
