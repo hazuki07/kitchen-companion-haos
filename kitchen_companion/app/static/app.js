@@ -25,6 +25,9 @@ const state = {
   catalogStatus: null,
   bundleImport: null,
   youtubeReimport: null,
+  youtubeReimportDrafts: new Map(),
+  youtubeReimportSummary: null,
+  youtubeReimportRunning: false,
   quantityMode: "recipe",
   cookTab: "step",
   shoppingSuggestions: [],
@@ -643,16 +646,30 @@ function renderYoutubeReimportPreview(preview) {
     .filter((label) => creatorCounts[label])
     .map((label) => `${label} ${creatorCounts[label]}件`)
     .join("・");
+  const summary = state.youtubeReimportSummary;
+  const bulkStatus = summary
+    ? `<p class="${summary.failed ? "unresolved" : ""}">全件処理：${summary.processed}/${summary.total}件・確認待ち ${summary.ready}件・要確認あり ${summary.warning}件・失敗 ${summary.failed}件</p><p>確認待ち結果はこの画面を閉じる前に1件ずつ確認・保存してください。</p>`
+    : "";
   element.innerHTML = `<strong>再取り込み対象 ${entries.length}件</strong>
     <p>Mealie ${Number(preview.mealie_count || 0)}件・ローカル下書き ${Number(preview.draft_count || 0)}件</p>
     ${creatorSummary ? `<p>${escapeHtml(creatorSummary)}</p>` : ""}
     <p>各レシピを再取得するとローカル下書きが開きます。内容を確認・保存した後に、Mealieへ同期してください。</p>
+    <button class="primary-button" type="button" data-action="bulk-reimport-youtube" ${entries.length && !state.youtubeReimportRunning ? "" : "disabled"}>${state.youtubeReimportRunning && summary ? `${summary.processed}/${summary.total}件を再取り込み中…` : "全件再取り込み"}</button>
+    ${bulkStatus}
     <ul>${entries.map((entry) => {
       const source = safeUrl(entry.source_url);
       const location = entry.source_kind === "draft" ? "ローカル下書き" : "Mealie";
+      const buttonLabel = entry.bulk_status === "ready"
+        ? "再取り込み結果を確認"
+        : entry.bulk_status === "failed"
+          ? "再試行"
+          : entry.bulk_status === "saved"
+            ? "保存済みを確認"
+            : entry.draft_status === "review" ? "下書きを確認" : "再取り込み";
       return `<li><strong>${escapeHtml(entry.creator || "動画URL")}</strong> — ${escapeHtml(entry.title)} <small>（${location}）</small>
       ${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">動画を確認</a>` : ""}
-      <button class="secondary-button" type="button" data-reimport-id="${escapeHtml(entry.id)}">${entry.draft_status === "review" ? "下書きを確認" : "再取り込み"}</button>
+      ${entry.bulk_error ? `<div class="unresolved">${escapeHtml(entry.bulk_error)}</div>` : ""}
+      <button class="secondary-button" type="button" data-reimport-id="${escapeHtml(entry.id)}">${buttonLabel}</button>
     </li>`;
     }).join("")}</ul>`;
   element.classList.remove("hidden");
@@ -663,6 +680,8 @@ async function previewYoutubeReimport(button) {
   button.textContent = "対象を確認中…";
   try {
     const preview = await api("/api/reimport/youtube/preview");
+    state.youtubeReimportDrafts.clear();
+    state.youtubeReimportSummary = null;
     renderYoutubeReimportPreview(preview);
     showToast(`YouTube由来の既存レシピは${preview.count}件です`);
   } catch (error) {
@@ -675,6 +694,12 @@ async function previewYoutubeReimport(button) {
 
 async function reimportYoutubeRecipe(recipeId, button) {
   if (!recipeId) return;
+  const prepared = state.youtubeReimportDrafts.get(recipeId);
+  if (prepared) {
+    openEditor(prepared, true);
+    showToast("再取り込み結果を開きました。内容を確認して保存してください");
+    return;
+  }
   button.disabled = true;
   button.textContent = "再取得中…";
   try {
@@ -698,6 +723,58 @@ async function reimportYoutubeRecipe(recipeId, button) {
     button.textContent = "再取り込み";
     showToast(error.message);
   }
+}
+
+async function bulkReimportYoutubeRecipes() {
+  const entries = state.youtubeReimport?.entries || [];
+  if (!entries.length || state.youtubeReimportRunning) return;
+  if (!window.confirm(
+    `対象${entries.length}件を20件ずつ再取り込みします。結果は確認待ちになり、Mealieへは同期しません。続けますか？`,
+  )) return;
+
+  state.youtubeReimportRunning = true;
+  state.youtubeReimportDrafts.clear();
+  state.youtubeReimportSummary = {
+    total: entries.length,
+    processed: 0,
+    ready: 0,
+    warning: 0,
+    failed: 0,
+  };
+  entries.forEach((entry) => {
+    delete entry.bulk_status;
+    delete entry.bulk_error;
+  });
+  renderYoutubeReimportPreview(state.youtubeReimport);
+
+  for (let batchStart = 0; batchStart < entries.length; batchStart += 20) {
+    const batch = entries.slice(batchStart, batchStart + 20);
+    for (const entry of batch) {
+      try {
+        const draft = await api(`/api/catalog/recipes/${encodeURIComponent(entry.id)}/reimport-video`, {
+          method: "POST",
+        });
+        state.youtubeReimportDrafts.set(entry.id, draft);
+        entry.bulk_status = "ready";
+        state.youtubeReimportSummary.ready += 1;
+        if (draft.import_warnings?.length) state.youtubeReimportSummary.warning += 1;
+      } catch (error) {
+        entry.bulk_status = "failed";
+        entry.bulk_error = error.message;
+        state.youtubeReimportSummary.failed += 1;
+      }
+      state.youtubeReimportSummary.processed += 1;
+      renderYoutubeReimportPreview(state.youtubeReimport);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  state.youtubeReimportRunning = false;
+  renderYoutubeReimportPreview(state.youtubeReimport);
+  await loadRecipes();
+  showToast(
+    `全件再取り込み完了：確認待ち${state.youtubeReimportSummary.ready}件・失敗${state.youtubeReimportSummary.failed}件`,
+  );
 }
 
 function reimportCurrentRecipe(button) {
@@ -860,6 +937,12 @@ async function saveRecipe(event) {
   };
   try {
     const recipe = await api(id ? `/api/recipes/${id}` : "/api/recipes", { method: id ? "PUT" : "POST", body: JSON.stringify(payload) });
+    for (const [candidateId, draft] of state.youtubeReimportDrafts.entries()) {
+      if (draft.id !== recipe.id) continue;
+      state.youtubeReimportDrafts.delete(candidateId);
+      const entry = state.youtubeReimport?.entries?.find((item) => item.id === candidateId);
+      if (entry) entry.bulk_status = "saved";
+    }
     $("#editorDialog").close();
     await loadRecipes();
     openDetail(recipe);
@@ -1577,6 +1660,7 @@ document.addEventListener("click", (event) => {
     "normalize-current": () => normalizeCurrentRecipe(target),
     "reimport-current": () => reimportCurrentRecipe(target),
     "preview-youtube-reimport": () => previewYoutubeReimport(target),
+    "bulk-reimport-youtube": bulkReimportYoutubeRecipes,
     "verify-mealie": () => verifyMealieSync(target),
     "sync-mealie": () => syncCurrentRecipe(target),
     "add-shopping-list": () => addSelectedRecipeToList("shopping", target),
