@@ -644,11 +644,13 @@ function renderYoutubeReimportPreview(preview) {
     .map((label) => `${label} ${creatorCounts[label]}件`)
     .join("・");
   element.innerHTML = `<strong>再取り込み対象 ${entries.length}件</strong>
+    <p>Mealie ${Number(preview.mealie_count || 0)}件・ローカル下書き ${Number(preview.draft_count || 0)}件</p>
     ${creatorSummary ? `<p>${escapeHtml(creatorSummary)}</p>` : ""}
     <p>各レシピを再取得するとローカル下書きが開きます。内容を確認・保存した後に、Mealieへ同期してください。</p>
     <ul>${entries.map((entry) => {
       const source = safeUrl(entry.source_url);
-      return `<li><strong>${escapeHtml(entry.creator || "動画URL")}</strong> — ${escapeHtml(entry.title)}
+      const location = entry.source_kind === "draft" ? "ローカル下書き" : "Mealie";
+      return `<li><strong>${escapeHtml(entry.creator || "動画URL")}</strong> — ${escapeHtml(entry.title)} <small>（${location}）</small>
       ${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">動画を確認</a>` : ""}
       <button class="secondary-button" type="button" data-reimport-id="${escapeHtml(entry.id)}">${entry.draft_status === "review" ? "下書きを確認" : "再取り込み"}</button>
     </li>`;
@@ -688,7 +690,7 @@ async function reimportYoutubeRecipe(recipeId, button) {
         : "再取り込みしました。内容を確認してください");
     if (state.youtubeReimport) {
       const entry = state.youtubeReimport.entries.find((item) => item.id === recipeId);
-      if (entry) entry.draft_status = "review";
+      if (entry) entry.draft_status = draft.reimport_status === "preview" ? "local" : "review";
       renderYoutubeReimportPreview(state.youtubeReimport);
     }
   } catch (error) {
