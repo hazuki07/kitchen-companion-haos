@@ -43,6 +43,7 @@ from app.server import (  # noqa: E402
     ingredient_amounts_match,
     parse_ingredient,
     parse_video_timestamp,
+    prepare_local_youtube_reimport,
     preview_review_bundle,
     save_review_bundle,
     validate_recipe,
@@ -424,7 +425,7 @@ class RecipeTests(unittest.TestCase):
                         "id": "local-youtube",
                         "title": "ローカル下書き",
                         "source_kind": "draft",
-                        "video_url": "https://www.youtube.com/watch?v=BcDeFgHiJ34",
+                        "video_url": "https://www.youtube.com/watch?v=EfGhIjKlM90",
                     },
                 ]
 
@@ -435,13 +436,15 @@ class RecipeTests(unittest.TestCase):
             store = RecipeStore(Path(directory) / "recipes.sqlite3")
             preview = youtube_reimport_candidates(Catalog(), store)
 
-        self.assertEqual(preview["count"], 4)
+        self.assertEqual(preview["count"], 5)
+        self.assertEqual(preview["mealie_count"], 4)
+        self.assertEqual(preview["draft_count"], 1)
         self.assertEqual(preview["entries"][0]["id"], "youtube-recipe")
         self.assertEqual(
             [entry["creator"] for entry in preview["entries"]],
-            ["ジョージ", "炊事場", "ファビオ", "おかずJAPAN"],
+            ["ジョージ", "炊事場", "ファビオ", "おかずJAPAN", "動画URL"],
         )
-        self.assertTrue(all(entry["draft_status"] == "new" for entry in preview["entries"]))
+        self.assertEqual(preview["entries"][-1]["draft_status"], "local")
 
     def test_youtube_reimport_creates_update_draft_and_preserves_portion_settings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -517,6 +520,41 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(repeated["id"], first["id"])
         self.assertEqual(repeated["title"], "確認中の架空料理")
         self.assertEqual(repeated["reimport_status"], "existing_draft")
+
+    def test_local_youtube_reimport_is_unsaved_preview_until_user_confirms(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            existing = store.save(
+                {
+                    "title": "確認済みのローカル料理",
+                    "servings": 4,
+                    "video_url": "https://youtu.be/AbCdEfGhI12",
+                    "ingredients": [{"amount": 100, "unit": "g", "name": "以前の食材"}],
+                    "steps": ["以前の工程。"],
+                    "tags": ["ファビオ"],
+                }
+            )
+            preview = prepare_local_youtube_reimport(
+                existing,
+                {
+                    "title": "再取得したローカル料理",
+                    "servings": 2,
+                    "servings_confirmed": True,
+                    "video_url": "https://youtu.be/AbCdEfGhI12",
+                    "ingredients": [{"amount": 200, "unit": "g", "name": "新しい食材"}],
+                    "steps": ["新しい工程。", "仕上げる。"],
+                    "tags": ["動画"],
+                },
+            )
+            unchanged = store.get(existing["id"])
+
+        self.assertEqual(preview["id"], existing["id"])
+        self.assertEqual(preview["title"], "再取得したローカル料理")
+        self.assertEqual(preview["tags"], ["ファビオ", "動画"])
+        self.assertEqual(preview["reimport_comparison"]["new_step_count"], 2)
+        self.assertIsNotNone(unchanged)
+        assert unchanged is not None
+        self.assertEqual(unchanged["title"], "確認済みのローカル料理")
 
     def test_mealie_verification_compares_normalized_amounts(self) -> None:
         local = {

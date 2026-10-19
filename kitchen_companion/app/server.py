@@ -759,33 +759,46 @@ def known_youtube_creator(recipe: dict[str, Any]) -> str:
 def youtube_reimport_candidates(
     catalog: RecipeReader, store: RecipeStore
 ) -> dict[str, Any]:
-    entries: list[dict[str, Any]] = []
+    entries_by_source: dict[str, dict[str, Any]] = {}
     for recipe in catalog.list():
-        mealie_slug = str(recipe.get("id") or "")
+        recipe_id = str(recipe.get("id") or "")
+        source_kind = str(recipe.get("source_kind") or "")
         source_url = youtube_recipe_url(recipe)
         if (
-            recipe.get("source_kind") != "mealie"
-            or not re.fullmatch(r"[a-zA-Z0-9_-]+", mealie_slug)
+            source_kind not in {"mealie", "draft"}
+            or not re.fullmatch(r"[a-zA-Z0-9_-]+", recipe_id)
             or not source_url
         ):
             continue
-        draft_id = str(
-            uuid.uuid5(uuid.NAMESPACE_URL, f"kitchen-companion:mealie:{mealie_slug}")
-        )
-        draft = store.get(draft_id)
-        entries.append(
-            {
-                "id": mealie_slug,
-                "title": str(recipe.get("title") or "名称未確認")[:160],
-                "creator": known_youtube_creator(recipe),
-                "source_url": source_url,
-                "draft_id": draft_id if draft else "",
-                "draft_status": (
-                    "synced" if draft and draft.get("mealie_sync_status") == "synced"
-                    else "review" if draft else "new"
-                ),
-            }
-        )
+        canonical_source = canonical_recipe_source(recipe)
+        previous = entries_by_source.get(canonical_source)
+        if previous and previous["source_kind"] == "draft":
+            continue
+        creator = known_youtube_creator(recipe)
+        if previous and creator == "動画URL":
+            creator = str(previous["creator"])
+        if source_kind == "draft":
+            draft_id = recipe_id
+            draft_status = "local"
+        else:
+            draft_id = str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"kitchen-companion:mealie:{recipe_id}")
+            )
+            draft = store.get(draft_id)
+            draft_status = (
+                "synced" if draft and draft.get("mealie_sync_status") == "synced"
+                else "review" if draft else "new"
+            )
+        entries_by_source[canonical_source] = {
+            "id": recipe_id,
+            "title": str(recipe.get("title") or "名称未確認")[:160],
+            "creator": creator,
+            "source_url": source_url,
+            "source_kind": source_kind,
+            "draft_id": draft_id,
+            "draft_status": draft_status,
+        }
+    entries = list(entries_by_source.values())
     creator_order = {"ジョージ": 0, "炊事場": 1, "ファビオ": 2, "おかずJAPAN": 3, "動画URL": 4}
     entries.sort(
         key=lambda entry: (
@@ -793,7 +806,60 @@ def youtube_reimport_candidates(
             str(entry["title"]).casefold(),
         )
     )
-    return {"count": len(entries), "entries": entries}
+    return {
+        "count": len(entries),
+        "mealie_count": sum(entry["source_kind"] == "mealie" for entry in entries),
+        "draft_count": sum(entry["source_kind"] == "draft" for entry in entries),
+        "entries": entries,
+    }
+
+
+def prepare_local_youtube_reimport(
+    existing: dict[str, Any], imported: dict[str, Any]
+) -> dict[str, Any]:
+    if existing.get("source_kind") != "draft" or not youtube_recipe_url(existing):
+        raise ValueError("YouTube由来のローカル下書きではありません")
+    preserve_fields = (
+        "portion_kind", "serving_volume_ml", "dilution_concentrate_parts",
+        "dilution_mixer_parts", "meat_g_per_person", "rice_go_per_person",
+    )
+    merged = validate_recipe(
+        {
+            **imported,
+            **{
+                key: existing[key]
+                for key in preserve_fields
+                if existing.get(key) is not None
+            },
+            "image_url": imported.get("image_url") or existing.get("image_url") or "",
+            "tags": list(
+                dict.fromkeys(
+                    [
+                        *[str(tag) for tag in existing.get("tags", [])],
+                        *[str(tag) for tag in imported.get("tags", [])],
+                    ]
+                )
+            )[:30],
+        }
+    )
+    return {
+        **merged,
+        "id": str(existing["id"]),
+        "source_kind": "draft",
+        "read_only": False,
+        "import_warnings": list(imported.get("import_warnings") or []),
+        "jev_review": imported.get("jev_review"),
+        "reimport_comparison": {
+            "previous_title": str(existing.get("title") or ""),
+            "previous_servings": existing.get("servings"),
+            "new_servings": merged.get("servings"),
+            "previous_ingredient_count": len(existing.get("ingredients") or []),
+            "new_ingredient_count": len(merged.get("ingredients") or []),
+            "previous_step_count": len(existing.get("steps") or []),
+            "new_step_count": len(merged.get("steps") or []),
+        },
+        "reimport_status": "preview",
+    }
 
 
 def create_youtube_reimport_draft(
@@ -1705,17 +1771,23 @@ class AppHandler(BaseHTTPRequestHandler):
                 r"/api/catalog/recipes/([a-zA-Z0-9_-]+)/reimport-video", self.path
             )
             if reimport_match:
-                mealie_slug = reimport_match.group(1)
-                recipe = self.catalog.get(mealie_slug)
-                if not recipe or recipe.get("source_kind") != "mealie":
-                    self.json_response({"error": "再取り込みするMealieレシピが見つかりません"}, 404)
+                recipe_id = reimport_match.group(1)
+                recipe = self.store.get(recipe_id)
+                if not recipe:
+                    recipe = self.catalog.get(recipe_id)
+                if not recipe or recipe.get("source_kind") not in {"mealie", "draft"}:
+                    self.json_response({"error": "再取り込みするレシピが見つかりません"}, 404)
                     return
                 source_url = youtube_recipe_url(recipe)
                 if not source_url:
                     self.json_response({"error": "YouTube由来のレシピではありません"}, 409)
                     return
+                imported = import_video(source_url, self.jev_reviewer)
+                if recipe.get("source_kind") == "draft":
+                    self.json_response(prepare_local_youtube_reimport(recipe, imported))
+                    return
                 draft_id = str(
-                    uuid.uuid5(uuid.NAMESPACE_URL, f"kitchen-companion:mealie:{mealie_slug}")
+                    uuid.uuid5(uuid.NAMESPACE_URL, f"kitchen-companion:mealie:{recipe_id}")
                 )
                 existing = self.store.get(draft_id)
                 if existing and existing.get("mealie_sync_status") != "synced":
@@ -1727,9 +1799,8 @@ class AppHandler(BaseHTTPRequestHandler):
                         }
                     )
                     return
-                imported = import_video(source_url, self.jev_reviewer)
                 draft = create_youtube_reimport_draft(
-                    self.store, recipe, mealie_slug, imported
+                    self.store, recipe, recipe_id, imported
                 )
                 self.json_response(draft, HTTPStatus.CREATED)
             elif normalize_match:
