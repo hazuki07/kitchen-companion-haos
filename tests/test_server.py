@@ -390,9 +390,29 @@ class RecipeTests(unittest.TestCase):
                 return [
                     {
                         "id": "youtube-recipe",
-                        "title": "架空の動画料理",
+                        "title": "ジョージの架空動画料理",
                         "source_kind": "mealie",
                         "video_url": "https://youtu.be/AbCdEfGhI12?t=15",
+                    },
+                    {
+                        "id": "suijiba-recipe",
+                        "title": "架空の煮物",
+                        "source_kind": "mealie",
+                        "source_url": "https://m.youtube.com/watch?v=BcDeFgHiJ34",
+                        "tags": ["炊事場"],
+                    },
+                    {
+                        "id": "fabio-recipe",
+                        "title": "ファビオの架空パスタ",
+                        "source_kind": "mealie",
+                        "source_url": "https://www.youtube.com/shorts/CdEfGhIjK56",
+                    },
+                    {
+                        "id": "okazu-recipe",
+                        "title": "架空のおかず",
+                        "description": "おかずJAPANの動画",
+                        "source_kind": "mealie",
+                        "video_url": "https://www.youtube-nocookie.com/embed/DeFgHiJkL78",
                     },
                     {
                         "id": "web-recipe",
@@ -415,9 +435,13 @@ class RecipeTests(unittest.TestCase):
             store = RecipeStore(Path(directory) / "recipes.sqlite3")
             preview = youtube_reimport_candidates(Catalog(), store)
 
-        self.assertEqual(preview["count"], 1)
+        self.assertEqual(preview["count"], 4)
         self.assertEqual(preview["entries"][0]["id"], "youtube-recipe")
-        self.assertEqual(preview["entries"][0]["draft_status"], "new")
+        self.assertEqual(
+            [entry["creator"] for entry in preview["entries"]],
+            ["ジョージ", "炊事場", "ファビオ", "おかずJAPAN"],
+        )
+        self.assertTrue(all(entry["draft_status"] == "new" for entry in preview["entries"]))
 
     def test_youtube_reimport_creates_update_draft_and_preserves_portion_settings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -842,6 +866,71 @@ class RecipeTests(unittest.TestCase):
         )
         self.assertEqual([call["method"] for call in transport.calls], ["GET", "GET"])
         self.assertEqual(transport.calls[0]["query"]["search"], "スープ")
+
+    def test_mealie_client_reads_every_recipe_page(self) -> None:
+        class PaginatedTransport:
+            def __init__(self) -> None:
+                self.list_pages: list[int] = []
+
+            def request(
+                self,
+                method: str,
+                path: str,
+                *,
+                query: dict[str, str | int] | None = None,
+                body: dict[str, Any] | None = None,
+            ) -> Any:
+                if path == "/api/recipes":
+                    page = int((query or {}).get("page", 1))
+                    self.list_pages.append(page)
+                    start = 0 if page == 1 else 50
+                    stop = 50 if page == 1 else 54
+                    return {
+                        "items": [
+                            {"slug": f"fictional-video-{index}"}
+                            for index in range(start, stop)
+                        ],
+                        "total": 54,
+                        "pages": 2,
+                        "next": 2 if page == 1 else None,
+                    }
+                slug = path.rsplit("/", 1)[-1]
+                index = int(slug.rsplit("-", 1)[-1])
+                return {
+                    "slug": slug,
+                    "name": f"架空の動画料理{index}",
+                    "orgURL": f"https://www.youtube.com/watch?v=A{index:010d}",
+                    "recipeIngredient": [],
+                    "recipeInstructions": [],
+                }
+
+        transport = PaginatedTransport()
+        recipes = MealieReadClient(transport).list()
+
+        self.assertEqual(len(recipes), 54)
+        self.assertEqual(transport.list_pages, [1, 2])
+        self.assertTrue(recipes[-1]["source_url"].endswith("A0000000053"))
+
+    def test_mealie_client_reads_mobile_youtube_extra_with_spaced_name(self) -> None:
+        transport = RecordingTransport(
+            [{
+                "slug": "fictional-video",
+                "name": "架空の動画料理",
+                "recipeIngredient": [],
+                "recipeInstructions": [],
+                "extras": {
+                    "YouTube URL": {"value": "https://m.youtube.com/watch?v=AbCdEfGhI12"}
+                },
+            }]
+        )
+
+        recipe = MealieReadClient(transport).get("fictional-video")
+
+        self.assertIsNotNone(recipe)
+        assert recipe is not None
+        self.assertEqual(
+            recipe["video_url"], "https://m.youtube.com/watch?v=AbCdEfGhI12"
+        )
 
     def test_mealie_client_normalizes_concatenated_ingredients(self) -> None:
         repeated_tea = "架空紅茶（種類A、または種類B） ...ティースプーン4〜5杯分"

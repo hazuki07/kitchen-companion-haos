@@ -634,11 +634,25 @@ function renderYoutubeReimportPreview(preview) {
   state.youtubeReimport = preview;
   const element = $("#youtubeReimportReview");
   const entries = Array.isArray(preview.entries) ? preview.entries : [];
+  const creatorCounts = entries.reduce((counts, entry) => {
+    const label = entry.creator || "動画URL";
+    counts[label] = (counts[label] || 0) + 1;
+    return counts;
+  }, {});
+  const creatorSummary = ["ジョージ", "炊事場", "ファビオ", "おかずJAPAN", "動画URL"]
+    .filter((label) => creatorCounts[label])
+    .map((label) => `${label} ${creatorCounts[label]}件`)
+    .join("・");
   element.innerHTML = `<strong>再取り込み対象 ${entries.length}件</strong>
+    ${creatorSummary ? `<p>${escapeHtml(creatorSummary)}</p>` : ""}
     <p>各レシピを再取得するとローカル下書きが開きます。内容を確認・保存した後に、Mealieへ同期してください。</p>
-    <ul>${entries.map((entry) => `<li>${escapeHtml(entry.title)}
+    <ul>${entries.map((entry) => {
+      const source = safeUrl(entry.source_url);
+      return `<li><strong>${escapeHtml(entry.creator || "動画URL")}</strong> — ${escapeHtml(entry.title)}
+      ${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">動画を確認</a>` : ""}
       <button class="secondary-button" type="button" data-reimport-id="${escapeHtml(entry.id)}">${entry.draft_status === "review" ? "下書きを確認" : "再取り込み"}</button>
-    </li>`).join("")}</ul>`;
+    </li>`;
+    }).join("")}</ul>`;
   element.classList.remove("hidden");
 }
 
