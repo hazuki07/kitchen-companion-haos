@@ -143,6 +143,13 @@
               <button class="secondary-button" data-mode="assist" data-source-target="mealie">Mealieから選ぶ</button>
             </article>
             <article class="import-option bundle-option">
+              <span class="feature-icon" aria-hidden="true">↻</span>
+              <h2>既存のYouTubeレシピを再取り込み</h2>
+              <p>Mealie内のYouTube由来レシピを一覧にし、1件ずつ最新の公開概要欄から下書きを作ります。確認するまでMealieは更新しません。</p>
+              <button class="secondary-button" type="button" data-action="preview-youtube-reimport">対象レシピを確認</button>
+              <div class="bundle-review hidden" id="youtubeReimportReview" aria-live="polite"></div>
+            </article>
+            <article class="import-option bundle-option">
               <span class="feature-icon" aria-hidden="true">✓</span>
               <h2>レビュー済みバンドル</h2>
               <p>確認済みJSONを読み込み、Mealieとローカル下書きの重複をプレビューしてから保存します。20件ずつ安全に分割し、最大400件まで一括処理します。</p>

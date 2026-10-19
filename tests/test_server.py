@@ -35,6 +35,7 @@ from app.server import (  # noqa: E402
     assert_public_host,
     build_recipe_list_items,
     create_normalized_draft,
+    create_youtube_reimport_draft,
     extract_description_recipe,
     extract_video_url,
     find_recipe_node,
@@ -46,6 +47,7 @@ from app.server import (  # noqa: E402
     save_review_bundle,
     validate_recipe,
     video_draft_from_html,
+    youtube_reimport_candidates,
 )
 
 
@@ -381,6 +383,116 @@ class RecipeTests(unittest.TestCase):
                     },
                     "fictional-recipe",
                 )
+
+    def test_youtube_reimport_preview_only_lists_mealie_youtube_recipes(self) -> None:
+        class Catalog:
+            def list(self, query: str = "") -> list[dict[str, Any]]:
+                return [
+                    {
+                        "id": "youtube-recipe",
+                        "title": "架空の動画料理",
+                        "source_kind": "mealie",
+                        "video_url": "https://youtu.be/AbCdEfGhI12?t=15",
+                    },
+                    {
+                        "id": "web-recipe",
+                        "title": "架空のWeb料理",
+                        "source_kind": "mealie",
+                        "source_url": "https://recipes.example.invalid/item",
+                    },
+                    {
+                        "id": "local-youtube",
+                        "title": "ローカル下書き",
+                        "source_kind": "draft",
+                        "video_url": "https://www.youtube.com/watch?v=BcDeFgHiJ34",
+                    },
+                ]
+
+            def get(self, recipe_id: str) -> dict[str, Any] | None:
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            preview = youtube_reimport_candidates(Catalog(), store)
+
+        self.assertEqual(preview["count"], 1)
+        self.assertEqual(preview["entries"][0]["id"], "youtube-recipe")
+        self.assertEqual(preview["entries"][0]["draft_status"], "new")
+
+    def test_youtube_reimport_creates_update_draft_and_preserves_portion_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            mealie_recipe = {
+                "title": "以前の架空料理",
+                "source_kind": "mealie",
+                "video_url": "https://www.youtube.com/watch?v=AbCdEfGhI12",
+                "portion_kind": "meat_main",
+                "meat_g_per_person": 180,
+                "tags": ["既存分類"],
+                "ingredients": [{"amount": 100, "unit": "g", "name": "以前の食材"}],
+                "steps": ["以前の工程。", "以前の仕上げ。"],
+            }
+            imported = {
+                "title": "再取り込みした架空料理",
+                "servings": 2,
+                "servings_confirmed": True,
+                "source_url": "https://www.youtube.com/watch?v=AbCdEfGhI12",
+                "video_url": "https://www.youtube.com/watch?v=AbCdEfGhI12",
+                "ingredients": [{"amount": 200, "unit": "g", "name": "架空食材"}],
+                "steps": ["架空食材を加熱する。"],
+                "tags": ["動画"],
+                "import_warnings": ["火加減を確認してください"],
+                "jev_review": {"approved": False},
+            }
+
+            draft = create_youtube_reimport_draft(
+                store, mealie_recipe, "youtube-recipe", imported
+            )
+            sync_state, slug, _ = store.begin_mealie_sync(draft["id"], "fingerprint")
+
+        self.assertEqual(draft["title"], "再取り込みした架空料理")
+        self.assertEqual(draft["portion_kind"], "meat_main")
+        self.assertEqual(draft["meat_g_per_person"], 180)
+        self.assertEqual(draft["tags"], ["既存分類", "動画"])
+        self.assertEqual(draft["import_warnings"], ["火加減を確認してください"])
+        self.assertEqual(draft["reimport_comparison"]["previous_ingredient_count"], 1)
+        self.assertEqual(draft["reimport_comparison"]["new_step_count"], 1)
+        self.assertEqual((sync_state, slug), ("update", "youtube-recipe"))
+
+    def test_youtube_reimport_does_not_overwrite_unreviewed_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            mealie_recipe = {
+                "title": "以前の架空料理",
+                "source_kind": "mealie",
+                "video_url": "https://youtu.be/AbCdEfGhI12",
+            }
+            first = create_youtube_reimport_draft(
+                store,
+                mealie_recipe,
+                "youtube-recipe",
+                {
+                    "title": "確認中の架空料理",
+                    "servings": 2,
+                    "ingredients": [],
+                    "steps": [],
+                },
+            )
+            repeated = create_youtube_reimport_draft(
+                store,
+                mealie_recipe,
+                "youtube-recipe",
+                {
+                    "title": "上書きしてはいけない料理",
+                    "servings": 2,
+                    "ingredients": [],
+                    "steps": [],
+                },
+            )
+
+        self.assertEqual(repeated["id"], first["id"])
+        self.assertEqual(repeated["title"], "確認中の架空料理")
+        self.assertEqual(repeated["reimport_status"], "existing_draft")
 
     def test_mealie_verification_compares_normalized_amounts(self) -> None:
         local = {
