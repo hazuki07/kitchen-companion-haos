@@ -87,7 +87,9 @@ class RecipeTests(unittest.TestCase):
             "source_url": f"https://www.youtube.com/watch?v={video_id}",
             "video_url": f"https://youtu.be/{video_id}?t=15",
             "ingredients": [{"amount": 100, "unit": "g", "name": "架空食材"}],
+            "ingredients_complete": True,
             "steps": ["架空食材を調理する。"],
+            "steps_complete": True,
             "unresolved_fields": ["火加減は未確認"],
         }
 
@@ -194,6 +196,23 @@ class RecipeTests(unittest.TestCase):
             saved = next(item for item in store.list() if item["title"] == recipe["title"])
             self.assertFalse(saved["servings_confirmed"])
             self.assertIn("要確認", saved["tags"])
+
+    def test_review_bundle_marks_unverified_video_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            catalog = CombinedRecipeCatalog(MockMealieCatalog(MOCK_MEALIE_FIXTURE), store)
+            recipe = self.reviewed_bundle_recipe("BcDeFgHiJ34")
+            recipe.pop("ingredients_complete")
+            recipe.pop("steps_complete")
+            recipe["unresolved_fields"] = []
+
+            review = preview_review_bundle({"recipes": [recipe]}, catalog)
+
+            self.assertEqual(review["counts"]["unresolved"], 1)
+            self.assertEqual(review["entries"][0]["unresolved_fields"], [
+                "概要欄の全材料を確認済みか未確認",
+                "動画の完成まで工程を確認済みか未確認",
+            ])
 
     def test_reviewed_bundle_save_requires_matching_preview_and_count(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -426,6 +445,16 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(parse_ingredient("しょうゆ 大さじ1")["amount"], 1)
         self.assertEqual(parse_ingredient("しょうゆ 大さじ1")["name"], "しょうゆ")
 
+    def test_concatenated_range_and_qualitative_ingredients(self) -> None:
+        onion = parse_ingredient("玉ねぎ1〜2個")
+        self.assertEqual((onion["amount"], onion["amount_max"], onion["unit"]), (1, 2, "個"))
+        salt = parse_ingredient("塩：少々")
+        self.assertIsNone(salt["amount"])
+        self.assertEqual((salt["name"], salt["note"]), ("塩", "少々"))
+        garlic = parse_ingredient("にんにく1片（みじん切り）")
+        self.assertEqual((garlic["amount"], garlic["unit"]), (1, "片"))
+        self.assertEqual(garlic["note"], "みじん切り")
+
     def test_private_import_host_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "ローカルネットワーク"):
             assert_public_host("http://127.0.0.1/recipe")
@@ -497,6 +526,52 @@ class RecipeTests(unittest.TestCase):
         )
         self.assertEqual(draft["steps"], ["豆を洗う。", "架空の鍋で煮る。"])
         self.assertEqual(draft["step_video_timestamps"], [15, 90])
+
+    def test_video_prefers_full_youtube_description_and_extended_headings(self) -> None:
+        description = """短くない完全な概要欄
+▼食材 2人分
+玉ねぎ1個
+鶏もも肉300g
+【調味料】
+しょうゆ：大さじ2
+塩：少々
+■工程
+1. 玉ねぎを切る。
+2. 鶏肉を焼く。
+【ポイント】
+ここから先は材料や工程ではありません。
+"""
+        player_response = {
+            "videoDetails": {
+                "title": "完全な架空動画",
+                "shortDescription": description,
+                "thumbnail": {"thumbnails": [{"url": "https://images.example.invalid/full.jpg"}]},
+            }
+        }
+        html = (
+            '<meta property="og:title" content="短いタイトル">'
+            '<meta property="og:description" content="短い説明">'
+            f"<script>var ytInitialPlayerResponse = {json.dumps(player_response)};</script>"
+        )
+        draft = video_draft_from_html("https://www.youtube.com/watch?v=AbCdEfGhI12", html)
+        self.assertEqual(draft["title"], "完全な架空動画")
+        self.assertEqual([item["name"] for item in draft["ingredients"]], [
+            "玉ねぎ", "鶏もも肉", "しょうゆ", "塩",
+        ])
+        self.assertEqual(draft["ingredients"][0]["amount_max"], None)
+        self.assertEqual(draft["ingredients"][3]["note"], "少々")
+        self.assertEqual(draft["steps"], ["玉ねぎを切る。", "鶏肉を焼く。"])
+        self.assertTrue(draft["servings_confirmed"])
+        self.assertEqual(draft["import_warnings"], [])
+
+    def test_video_marks_missing_recipe_content_for_review(self) -> None:
+        draft = video_draft_from_html(
+            "https://video.example.invalid/watch/no-recipe",
+            '<meta property="og:title" content="架空の料理動画">',
+        )
+        self.assertFalse(draft["servings_confirmed"])
+        self.assertEqual(len(draft["import_warnings"]), 2)
+        self.assertIn("動画音声は自動要約していない", draft["import_warnings"][1])
 
     def test_video_recipe_json_ld_prefills_ingredients_and_steps(self) -> None:
         payload = {

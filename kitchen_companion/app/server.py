@@ -11,6 +11,7 @@ import os
 import re
 import socket
 import sqlite3
+import unicodedata
 import uuid
 from html.parser import HTMLParser
 from http import HTTPStatus
@@ -776,6 +777,11 @@ def canonical_recipe_source(recipe: dict[str, Any]) -> str:
     return ""
 
 
+def append_unresolved(unresolved: list[str], message: str) -> None:
+    if len(unresolved) < 20 and message not in unresolved:
+        unresolved.append(message)
+
+
 def _review_bundle_payload(
     raw: dict[str, Any], catalog: RecipeReader
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -805,8 +811,18 @@ def _review_bundle_payload(
         if not isinstance(unresolved, list):
             raise ValueError(f"{index}件目の未確認項目の形式が正しくありません")
         unresolved = [str(item)[:300] for item in unresolved[:20] if str(item).strip()]
+
         if not recipe["servings_confirmed"] and not any("基準人数" in item for item in unresolved):
             unresolved.insert(0, "基準人数は未確認")
+            unresolved = unresolved[:20]
+        if not recipe["ingredients"]:
+            append_unresolved(unresolved, "材料を取得できていません")
+        elif recipe["video_url"] and raw_recipe.get("ingredients_complete") is not True:
+            append_unresolved(unresolved, "概要欄の全材料を確認済みか未確認")
+        if not recipe["steps"]:
+            append_unresolved(unresolved, "工程を取得できていません")
+        elif recipe["video_url"] and raw_recipe.get("steps_complete") is not True:
+            append_unresolved(unresolved, "動画の完成まで工程を確認済みか未確認")
         if unresolved:
             review_note = f"未確認項目: {'／'.join(unresolved)}"
             recipe["description"] = "\n\n".join(
@@ -901,42 +917,54 @@ def save_review_bundle(
 
 def parse_ingredient(text: str) -> dict[str, Any]:
     original_text = str(text).strip()[:500]
-    text = original_text.replace("½", "1/2").replace("¼", "1/4").replace("¾", "3/4")
-    number_pattern = r"(\d+(?:\.\d+)?|\d+\s*/\s*\d+)"
-    unit_pattern = r"(大さじ|小さじ|カップ|ml|mL|l|L|g|kg|個|本|枚|片|株|袋|缶|束|合)"
-    match = re.match(rf"^\s*{number_pattern}\s*{unit_pattern}?\s+(.+)$", text)
-    if match:
-        number, unit, name = match.group(1), match.group(2) or "", match.group(3)
-    else:
-        match = re.match(rf"^(.+?)\s+{unit_pattern}\s*{number_pattern}\s*$", text)
-        if match:
-            name, unit, number = match.group(1), match.group(2), match.group(3)
-        else:
-            match = re.match(rf"^(.+?)\s+{number_pattern}\s*{unit_pattern}\s*$", text)
-            if not match:
-                return {
-                    "amount": None,
-                    "amount_max": None,
-                    "amount_text": "",
-                    "unit": "",
-                    "name": text[:200],
-                    "note": "",
-                    "original_text": original_text,
-                }
-            name, number, unit = match.group(1), match.group(2), match.group(3)
-    number = number.replace(" ", "")
-    if "/" in number:
-        numerator, denominator = number.split("/", 1)
-        amount = float(numerator) / float(denominator)
-    else:
-        amount = float(number)
+    normalized = unicodedata.normalize("NFKC", original_text)
+    normalized = normalized.replace("½", "1/2").replace("¼", "1/4").replace("¾", "3/4")
+    normalized = re.sub(r"^[\s・●◯○■□✓✔*\-]+", "", normalized).strip()
+    number = r"\d+\s*/\s*\d+|\d+(?:\.\d+)?"
+    amount_pattern = rf"(?P<low>{number})(?:\s*(?:〜|~|－|-)\s*(?P<high>{number}))?"
+    unit_pattern = (
+        r"(?P<unit>大さじ|小さじ|カップ|cc|ml|mL|l|L|g|kg|個|本|枚|片|株|袋|缶|"
+        r"束|合|玉|丁|パック|つまみ)"
+    )
+    separator = r"[\s:：・…]*"
+    note_suffix = r"(?:\s*[（(](?P<note>[^）)]{1,100})[）)])?"
+    patterns = (
+        rf"^(?P<name>.+?){separator}{unit_pattern}\s*{amount_pattern}{note_suffix}\s*$",
+        rf"^{amount_pattern}\s*{unit_pattern}?{separator}(?P<name>.+?){note_suffix}\s*$",
+        rf"^(?P<name>.+?){separator}{amount_pattern}\s*{unit_pattern}{note_suffix}\s*$",
+    )
+    match = next((candidate for pattern in patterns if (candidate := re.match(pattern, normalized))), None)
+    if not match:
+        qualitative = re.match(
+            r"^(?P<name>.+?)[\s:：・…]*(?P<note>適量|少々|ひとつまみ|お好みで)\s*$",
+            normalized,
+        )
+        return {
+            "amount": None,
+            "amount_max": None,
+            "amount_text": "",
+            "unit": "",
+            "name": (qualitative.group("name") if qualitative else normalized)[:200].strip(),
+            "note": (qualitative.group("note") if qualitative else ""),
+            "original_text": original_text,
+        }
+
+    def numeric(value: str) -> float:
+        value = value.replace(" ", "")
+        if "/" in value:
+            numerator, denominator = value.split("/", 1)
+            return float(numerator) / float(denominator)
+        return float(value)
+
+    low_text = match.group("low").replace(" ", "")
+    high_text = (match.groupdict().get("high") or "").replace(" ", "")
     return {
-        "amount": amount,
-        "amount_max": None,
-        "amount_text": number[:50],
-        "unit": unit,
-        "name": name[:200],
-        "note": "",
+        "amount": numeric(low_text),
+        "amount_max": numeric(high_text) if high_text else None,
+        "amount_text": low_text[:50],
+        "unit": (match.groupdict().get("unit") or ""),
+        "name": match.group("name")[:200].strip(" :：・…"),
+        "note": (match.groupdict().get("note") or "").strip(),
         "original_text": original_text,
     }
 
@@ -1053,16 +1081,30 @@ def extract_video_url(value: Any) -> str:
 
 
 def extract_description_recipe(description: str) -> tuple[float, list[dict[str, Any]], list[str]]:
-    servings_match = re.search(r"(\d+(?:\.\d+)?)\s*人分", description)
+    description = unicodedata.normalize("NFKC", str(description or ""))
+    servings_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:人分|servings?)", description, re.IGNORECASE
+    )
     servings = float(servings_match.group(1)) if servings_match else 2
     ingredients: list[dict[str, Any]] = []
     steps: list[str] = []
     section = ""
-    ingredient_heading = re.compile(r"^(?:[#【\[（(\s]*)(?:材料|ingredients?)", re.IGNORECASE)
-    step_heading = re.compile(
-        r"^(?:[#【\[（(\s]*)(?:作り方|手順|調理手順|directions?|instructions?|method)",
+    heading_prefix = r"[\s#【\[（(■□●○◆◇▼▽★☆*=_\-]*"
+    ingredient_heading = re.compile(
+        rf"^{heading_prefix}(?:材料(?:一覧)?|食材|調味料|ingredients?)",
         re.IGNORECASE,
     )
+    step_heading = re.compile(
+        rf"^{heading_prefix}(?:作り方|作りかた|手順|調理手順|工程|directions?|"
+        r"instructions?|method|how\s+to\s+make)",
+        re.IGNORECASE,
+    )
+    unrelated_heading = re.compile(
+        rf"^{heading_prefix}(?:ポイント|コツ|注意|保存|目次|チャプター|chapter|"
+        r"timestamps?|関連|リンク|sns|お知らせ|道具|器具|equipment|notes?|tips?)",
+        re.IGNORECASE,
+    )
+    decoration_heading = re.compile(r"^[【\[（(].{1,40}[】\]）)]\s*$")
     for raw_line in description.splitlines():
         line = raw_line.strip()
         if ingredient_heading.match(line):
@@ -1071,14 +1113,21 @@ def extract_description_recipe(description: str) -> tuple[float, list[dict[str, 
         if step_heading.match(line):
             section = "steps"
             continue
+        if unrelated_heading.match(line):
+            section = ""
+            continue
         if not line or not section:
             continue
         if line.startswith(("http://", "https://")) or (line.startswith("#") and len(line) < 80):
             section = ""
             continue
+        if decoration_heading.match(line):
+            continue
         cleaned = re.sub(r"^[\s・●◯○■□✓✔*-]+", "", line)
         if section == "steps":
-            cleaned = re.sub(r"^\d+[.)．、:](?!\d)\s*", "", cleaned)
+            cleaned = re.sub(
+                r"^(?:step\s*)?\d+[.)．、:](?!\d)\s*", "", cleaned, flags=re.IGNORECASE
+            )
         if not cleaned:
             continue
         if section == "ingredients" and len(ingredients) < 200:
@@ -1150,15 +1199,78 @@ def parse_json_ld_nodes(html: str) -> list[Any]:
     return nodes
 
 
+def extract_embedded_json(html: str, marker: str) -> dict[str, Any] | None:
+    """Read a JSON object assigned to a known page variable without evaluating JavaScript."""
+    decoder = json.JSONDecoder()
+    for found in re.finditer(re.escape(marker), html):
+        object_start = html.find("{", found.end(), found.end() + 500)
+        if object_start < 0:
+            continue
+        try:
+            value, _ = decoder.raw_decode(html[object_start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _structured_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    if value.get("simpleText"):
+        return str(value["simpleText"]).strip()
+    runs = value.get("runs")
+    if isinstance(runs, list):
+        return "".join(
+            str(run.get("text") or "") for run in runs if isinstance(run, dict)
+        ).strip()
+    return str(value.get("content") or "").strip()
+
+
+def youtube_player_metadata(html: str) -> dict[str, str]:
+    response = extract_embedded_json(html, "ytInitialPlayerResponse") or {}
+    details = response.get("videoDetails")
+    details = details if isinstance(details, dict) else {}
+    microformat = response.get("microformat")
+    microformat = microformat if isinstance(microformat, dict) else {}
+    renderer = microformat.get("playerMicroformatRenderer")
+    renderer = renderer if isinstance(renderer, dict) else {}
+
+    descriptions = [
+        str(details.get("shortDescription") or "").strip(),
+        _structured_text(renderer.get("description")),
+    ]
+    thumbnail_data = details.get("thumbnail")
+    thumbnail_data = thumbnail_data if isinstance(thumbnail_data, dict) else {}
+    thumbnails = thumbnail_data.get("thumbnails", [])
+    thumbnails = thumbnails if isinstance(thumbnails, list) else []
+    image = next(
+        (
+            str(item.get("url") or "")
+            for item in reversed(thumbnails)
+            if isinstance(item, dict) and item.get("url")
+        ),
+        "",
+    )
+    return {
+        "title": str(details.get("title") or "").strip() or _structured_text(renderer.get("title")),
+        "description": max(descriptions, key=len, default=""),
+        "image": image,
+    }
+
+
 def recipe_draft_from_node(node: dict[str, Any], source_url: str, video_url: str = "") -> dict[str, Any]:
     image = node.get("image", "")
     if isinstance(image, list):
         image = image[0] if image else ""
     if isinstance(image, dict):
         image = image.get("url", "")
-    yield_value = node.get("recipeYield", 2)
+    yield_value = node.get("recipeYield")
     if isinstance(yield_value, list):
-        yield_value = yield_value[0] if yield_value else 2
+        yield_value = yield_value[0] if yield_value else None
     match = re.search(r"\d+(?:\.\d+)?", str(yield_value))
     servings = float(match.group()) if match else 2
     steps, step_video_timestamps = steps_with_video_timestamps(
@@ -1169,6 +1281,7 @@ def recipe_draft_from_node(node: dict[str, Any], source_url: str, video_url: str
             "title": node.get("name", "取り込んだレシピ"),
             "description": node.get("description", ""),
             "servings": servings,
+            "servings_confirmed": match is not None,
             "source_url": source_url,
             "video_url": video_url or extract_video_url(node.get("video")),
             "image_url": urljoin(source_url, str(image)) if image else "",
@@ -1180,11 +1293,41 @@ def recipe_draft_from_node(node: dict[str, Any], source_url: str, video_url: str
     )
 
 
+def with_video_import_warnings(recipe: dict[str, Any]) -> dict[str, Any]:
+    result = dict(recipe)
+    warnings: list[str] = []
+    if not result.get("ingredients"):
+        warnings.append("概要欄または構造化データから材料を確認できませんでした")
+    if not result.get("steps"):
+        warnings.append(
+            "概要欄または構造化データに作り方がありません。動画音声は自動要約していないため、工程を確認してください"
+        )
+    result["import_warnings"] = warnings
+    return result
+
+
 def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
     structured = parse_json_ld_nodes(html)
     recipe_node = next((node for value in structured if (node := find_recipe_node(value))), None)
+    youtube = youtube_player_metadata(html)
     if recipe_node:
-        return recipe_draft_from_node(recipe_node, url, url)
+        draft = recipe_draft_from_node(recipe_node, url, url)
+        full_description = youtube["description"]
+        servings, ingredients, steps = extract_description_recipe(full_description)
+        if not draft["ingredients"] and ingredients:
+            draft["ingredients"] = ingredients
+        if not draft["steps"] and steps:
+            clean_steps, timestamps = steps_with_video_timestamps(steps)
+            draft["steps"] = clean_steps
+            draft["step_video_timestamps"] = timestamps
+        if full_description and len(full_description) > len(draft["description"]):
+            draft["description"] = full_description[:2000]
+        if not draft["servings_confirmed"] and re.search(
+            r"\d+(?:\.\d+)?\s*(?:人分|servings?)", full_description, re.IGNORECASE
+        ):
+            draft["servings"] = servings
+            draft["servings_confirmed"] = True
+        return with_video_import_warnings(draft)
 
     video_node = next(
         (node for value in structured if (node := find_typed_node(value, "VideoObject"))),
@@ -1192,33 +1335,37 @@ def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
     )
     metadata = PageMetadataParser()
     metadata.feed(html)
-    title = str((video_node or {}).get("name") or "").strip()
+    title = youtube["title"] or str((video_node or {}).get("name") or "").strip()
     if not title:
         title = metadata.metadata.get("og:title") or metadata.metadata.get("twitter:title") or metadata.title
-    description = str((video_node or {}).get("description") or "").strip()
-    if not description:
-        description = (
-            metadata.metadata.get("og:description")
-            or metadata.metadata.get("twitter:description")
-            or metadata.metadata.get("description")
-            or ""
-        )
-    image = (video_node or {}).get("thumbnailUrl", "")
+    description_candidates = [
+        youtube["description"],
+        str((video_node or {}).get("description") or "").strip(),
+        metadata.metadata.get("og:description", ""),
+        metadata.metadata.get("twitter:description", ""),
+        metadata.metadata.get("description", ""),
+    ]
+    description = max(description_candidates, key=len, default="")
+    image = youtube["image"] or (video_node or {}).get("thumbnailUrl", "")
     if isinstance(image, list):
         image = image[0] if image else ""
     if not image:
         image = metadata.metadata.get("og:image") or metadata.metadata.get("twitter:image") or ""
     servings, ingredients, steps = extract_description_recipe(description)
+    servings_confirmed = bool(
+        re.search(r"\d+(?:\.\d+)?\s*(?:人分|servings?)", description, re.IGNORECASE)
+    )
     steps, step_video_timestamps = steps_with_video_timestamps(steps)
     try:
         image_url = safe_image_url(urljoin(url, str(image or "")))
     except ValueError:
         image_url = ""
-    return validate_recipe(
+    draft = validate_recipe(
         {
             "title": title or "動画レシピ",
             "description": description,
             "servings": servings,
+            "servings_confirmed": servings_confirmed,
             "source_url": url,
             "video_url": url,
             "image_url": image_url,
@@ -1228,6 +1375,7 @@ def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
             "tags": ["動画"],
         }
     )
+    return with_video_import_warnings(draft)
 
 
 def import_recipe(url: str) -> dict[str, Any]:
