@@ -34,6 +34,7 @@ from app.server import (  # noqa: E402
     RecipeStore,
     assert_public_host,
     build_recipe_list_items,
+    compare_recipe_ingredients,
     create_normalized_draft,
     create_youtube_reimport_draft,
     extract_description_recipe,
@@ -483,6 +484,7 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(draft["tags"], ["既存分類", "動画"])
         self.assertEqual(draft["import_warnings"], ["火加減を確認してください"])
         self.assertEqual(draft["reimport_comparison"]["previous_ingredient_count"], 1)
+        self.assertEqual(draft["reimport_comparison"]["ingredients"]["status"], "changed")
         self.assertEqual(draft["reimport_comparison"]["new_step_count"], 1)
         self.assertEqual((sync_state, slug), ("update", "youtube-recipe"))
 
@@ -552,9 +554,67 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(preview["title"], "再取得したローカル料理")
         self.assertEqual(preview["tags"], ["ファビオ", "動画"])
         self.assertEqual(preview["reimport_comparison"]["new_step_count"], 2)
+        self.assertEqual(preview["reimport_comparison"]["ingredients"]["status"], "changed")
         self.assertIsNotNone(unchanged)
         assert unchanged is not None
         self.assertEqual(unchanged["title"], "確認済みのローカル料理")
+
+    def test_reimport_ingredient_comparison_ignores_order_and_width(self) -> None:
+        previous = {
+            "ingredients": [
+                {"amount": 100, "unit": "ｇ", "name": "架空 食材", "note": ""},
+                {"amount": 0.5, "amount_text": "1/2", "unit": "小さじ", "name": "塩"},
+            ]
+        }
+        current = {
+            "ingredients": [
+                {"amount": 0.5, "amount_text": "0.5", "unit": "小さじ", "name": "塩"},
+                {"amount": 100.0, "unit": "g", "name": "架空 食材", "note": ""},
+            ]
+        }
+
+        comparison = compare_recipe_ingredients(previous, current)
+
+        self.assertEqual(comparison["status"], "unchanged")
+        self.assertEqual(comparison["added"], [])
+        self.assertEqual(comparison["removed"], [])
+
+    def test_reimport_ingredient_comparison_reports_quantity_change(self) -> None:
+        previous = {
+            "ingredients": [
+                {
+                    "amount": 100,
+                    "amount_text": "100",
+                    "unit": "g",
+                    "name": "架空食材",
+                    "original_text": "架空食材 100g",
+                }
+            ]
+        }
+        current = {
+            "ingredients": [
+                {
+                    "amount": 200,
+                    "amount_text": "200",
+                    "unit": "g",
+                    "name": "架空食材",
+                    "original_text": "架空食材 200g",
+                }
+            ]
+        }
+
+        comparison = compare_recipe_ingredients(previous, current)
+
+        self.assertEqual(comparison["status"], "changed")
+        self.assertEqual(comparison["added_count"], 1)
+        self.assertEqual(comparison["removed_count"], 1)
+        self.assertEqual(comparison["added"], ["架空食材 200g"])
+        self.assertEqual(comparison["removed"], ["架空食材 100g"])
+
+    def test_reimport_ingredient_comparison_requires_review_when_both_are_empty(self) -> None:
+        comparison = compare_recipe_ingredients({"ingredients": []}, {"ingredients": []})
+
+        self.assertEqual(comparison["status"], "unknown")
 
     def test_mealie_verification_compares_normalized_amounts(self) -> None:
         local = {

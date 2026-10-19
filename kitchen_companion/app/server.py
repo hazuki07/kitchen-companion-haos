@@ -13,6 +13,7 @@ import socket
 import sqlite3
 import unicodedata
 import uuid
+from collections import Counter
 from html.parser import HTMLParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -849,15 +850,7 @@ def prepare_local_youtube_reimport(
         "read_only": False,
         "import_warnings": list(imported.get("import_warnings") or []),
         "jev_review": imported.get("jev_review"),
-        "reimport_comparison": {
-            "previous_title": str(existing.get("title") or ""),
-            "previous_servings": existing.get("servings"),
-            "new_servings": merged.get("servings"),
-            "previous_ingredient_count": len(existing.get("ingredients") or []),
-            "new_ingredient_count": len(merged.get("ingredients") or []),
-            "previous_step_count": len(existing.get("steps") or []),
-            "new_step_count": len(merged.get("steps") or []),
-        },
+        "reimport_comparison": reimport_comparison(existing, merged),
         "reimport_status": "preview",
     }
 
@@ -878,6 +871,7 @@ def create_youtube_reimport_draft(
         return {
             **existing,
             "import_warnings": ["確認中の再取り込み下書きがあります"],
+            "reimport_comparison": reimport_comparison(mealie_recipe, existing),
             "reimport_status": "existing_draft",
         }
 
@@ -911,16 +905,117 @@ def create_youtube_reimport_draft(
         **result,
         "import_warnings": list(imported.get("import_warnings") or []),
         "jev_review": imported.get("jev_review"),
-        "reimport_comparison": {
-            "previous_title": str(mealie_recipe.get("title") or ""),
-            "previous_servings": mealie_recipe.get("servings"),
-            "new_servings": result.get("servings"),
-            "previous_ingredient_count": len(mealie_recipe.get("ingredients") or []),
-            "new_ingredient_count": len(result.get("ingredients") or []),
-            "previous_step_count": len(mealie_recipe.get("steps") or []),
-            "new_step_count": len(result.get("steps") or []),
-        },
+        "reimport_comparison": reimport_comparison(mealie_recipe, result),
         "reimport_status": "created",
+    }
+
+
+def _comparison_text(value: Any) -> str:
+    return " ".join(unicodedata.normalize("NFKC", str(value or "")).split()).casefold()
+
+
+def _comparison_number(value: Any) -> float | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        return round(float(value), 8)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ingredient_comparison_items(recipe: dict[str, Any]) -> list[tuple[tuple[Any, ...], str]]:
+    result: list[tuple[tuple[Any, ...], str]] = []
+    ingredients = recipe.get("ingredients")
+    if not isinstance(ingredients, list):
+        return result
+    for item in ingredients:
+        if not isinstance(item, dict) or not str(item.get("name") or "").strip():
+            continue
+        amount = _comparison_number(item.get("amount"))
+        amount_max = _comparison_number(item.get("amount_max"))
+        amount_text = "" if amount is not None else _comparison_text(item.get("amount_text"))
+        signature = (
+            amount,
+            amount_max,
+            amount_text,
+            _comparison_text(item.get("unit")),
+            _comparison_text(item.get("name")),
+            _comparison_text(item.get("note")),
+        )
+        label = str(item.get("original_text") or "").strip()
+        if not label:
+            label = " ".join(
+                part
+                for part in (
+                    str(item.get("amount_text") or "").strip(),
+                    str(item.get("unit") or "").strip(),
+                    str(item.get("name") or "").strip(),
+                    str(item.get("note") or "").strip(),
+                )
+                if part
+            )
+        result.append((signature, label[:500]))
+    return result
+
+
+def compare_recipe_ingredients(
+    previous: dict[str, Any], current: dict[str, Any]
+) -> dict[str, Any]:
+    previous_items = _ingredient_comparison_items(previous)
+    current_items = _ingredient_comparison_items(current)
+    if not previous_items and not current_items:
+        return {
+            "status": "unknown",
+            "added_count": 0,
+            "removed_count": 0,
+            "added": [],
+            "removed": [],
+        }
+
+    previous_counts = Counter(signature for signature, _ in previous_items)
+    current_counts = Counter(signature for signature, _ in current_items)
+    if previous_counts == current_counts:
+        return {
+            "status": "unchanged",
+            "added_count": 0,
+            "removed_count": 0,
+            "added": [],
+            "removed": [],
+        }
+
+    added_counts = current_counts - previous_counts
+    removed_counts = previous_counts - current_counts
+
+    def labels(
+        items: list[tuple[tuple[Any, ...], str]], remaining: Counter[tuple[Any, ...]]
+    ) -> list[str]:
+        result: list[str] = []
+        for signature, label in items:
+            if remaining[signature] <= 0:
+                continue
+            result.append(label)
+            remaining[signature] -= 1
+        return result[:20]
+
+    return {
+        "status": "changed",
+        "added_count": added_counts.total(),
+        "removed_count": removed_counts.total(),
+        "added": labels(current_items, added_counts),
+        "removed": labels(previous_items, removed_counts),
+    }
+
+
+def reimport_comparison(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "previous_title": str(previous.get("title") or ""),
+        "previous_servings": previous.get("servings"),
+        "new_servings": current.get("servings"),
+        "previous_ingredient_count": len(previous.get("ingredients") or []),
+        "new_ingredient_count": len(current.get("ingredients") or []),
+        "previous_step_count": len(previous.get("steps") or []),
+        "new_step_count": len(current.get("steps") or []),
+        "ingredients": compare_recipe_ingredients(previous, current),
     }
 
 
@@ -1795,6 +1890,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         {
                             **existing,
                             "import_warnings": ["確認中の再取り込み下書きがあります"],
+                            "reimport_comparison": reimport_comparison(recipe, existing),
                             "reimport_status": "existing_draft",
                         }
                     )
