@@ -40,6 +40,7 @@ from .integrations import (
     StageTimerController,
     StageTodoController,
 )
+from .jev import JevRecipeImportReviewer, RecipeImportReviewer
 from .nutrition import with_calorie_estimate
 from .timing import with_cooking_time_estimate
 
@@ -1306,6 +1307,35 @@ def with_video_import_warnings(recipe: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def with_jev_import_review(
+    recipe: dict[str, Any], source_text: str, reviewer: RecipeImportReviewer
+) -> dict[str, Any]:
+    result = dict(recipe)
+    warnings = list(result.get("import_warnings") or [])
+    try:
+        review = reviewer.review(source_text, result)
+    except IntegrationError:
+        review = {"status": "unavailable", "approved": False}
+        warnings.append("Jev検品を完了できませんでした。材料と工程を手動で確認してください")
+    else:
+        threshold = float(getattr(reviewer, "threshold", 0.75))
+        if review.get("decision") != "recipe" or (review.get("recipe_probability") or 0) < threshold:
+            warnings.append("Jevでは再現可能なレシピか確認できませんでした")
+        if (review.get("source_ingredients_complete") or 0) < threshold:
+            warnings.append("Jevでは出典に全材料が記載されているか確認できませんでした")
+        elif (review.get("ingredients_grounded") or 0) < threshold:
+            warnings.append("Jevでは取り込んだ材料と出典の一致を確認できませんでした")
+        if (review.get("source_steps_complete") or 0) < threshold:
+            warnings.append("Jevでは料理完成までの工程が出典にあるか確認できませんでした")
+        elif (review.get("steps_grounded") or 0) < threshold:
+            warnings.append("Jevでは取り込んだ工程と出典の一致を確認できませんでした")
+        if (review.get("needs_human_review") or 0) >= 1 - threshold:
+            warnings.append("Jevが人による確認を推奨しています")
+    result["import_warnings"] = list(dict.fromkeys(warnings))
+    result["jev_review"] = review
+    return result
+
+
 def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
     structured = parse_json_ld_nodes(html)
     recipe_node = next((node for value in structured if (node := find_recipe_node(value))), None)
@@ -1390,9 +1420,13 @@ def import_recipe(url: str) -> dict[str, Any]:
     return recipe_draft_from_node(node, url)
 
 
-def import_video(url: str) -> dict[str, Any]:
+def import_video(url: str, reviewer: RecipeImportReviewer | None = None) -> dict[str, Any]:
     url, html = fetch_public_html(url, "動画")
-    return video_draft_from_html(url, html)
+    draft = video_draft_from_html(url, html)
+    if reviewer is None:
+        return draft
+    source_text = youtube_player_metadata(html)["description"] or draft["description"]
+    return with_jev_import_review(draft, source_text, reviewer)
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -1404,6 +1438,7 @@ class AppHandler(BaseHTTPRequestHandler):
     todo: StageTodoController | HomeAssistantTodoClient
     images: MealieImageClient | None
     mealie_sync: MealieSyncClient | None
+    jev_reviewer: RecipeImportReviewer | None
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"{self.address_string()} - {fmt % args}")
@@ -1540,7 +1575,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.json_response(import_recipe(str(data.get("url", ""))))
             elif self.path == "/api/import/video":
                 data = self.body()
-                self.json_response(import_video(str(data.get("url", ""))))
+                self.json_response(
+                    import_video(str(data.get("url", "")), self.jev_reviewer)
+                )
             elif self.path == "/api/import/bundle/preview":
                 self.json_response(preview_review_bundle(self.body(), self.catalog))
             elif self.path == "/api/import/bundle/save":
@@ -1892,6 +1929,19 @@ class AppHandler(BaseHTTPRequestHandler):
 def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
     runtime = RuntimeConfig.from_environment()
     store = RecipeStore(db_path)
+    jev_reviewer: RecipeImportReviewer | None = None
+    if runtime.jev_enabled:
+        jev_api_key = os.environ.get("TYPESAFE_API_KEY", "").strip()
+        if not jev_api_key:
+            raise ValueError("Jev検品を有効にするにはTypeSafe API keyが必要です")
+        jev_reviewer = JevRecipeImportReviewer(
+            UrllibJsonTransport(
+                "https://api.typesafe.ai",
+                jev_api_key,
+                timeout=12,
+                max_response_bytes=500_000,
+            )
+        )
     if runtime.mode in {"stage", "prototype"}:
         recipe_reader: RecipeReader = MockMealieCatalog(MOCK_MEALIE_FIXTURE)
         cooking: StageCookingController | HomeAssistantCookingClient = StageCookingController()
@@ -1943,6 +1993,7 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
             "todo": todo,
             "images": images,
             "mealie_sync": mealie_sync,
+            "jev_reviewer": jev_reviewer,
         },
     )
     return ThreadingHTTPServer((host, port), handler)

@@ -592,6 +592,19 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(status["home_assistant"], "mock")
         self.assertEqual(status["mealie"], "mock_read_only")
         self.assertFalse(status["external_write_enabled"])
+        self.assertFalse(status["jev_review_enabled"])
+
+    def test_runtime_reports_optional_jev_review(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "COOKING_ASSISTANT_MODE": "stage",
+                "COOKING_ASSISTANT_JEV_ENABLED": "true",
+            },
+            clear=True,
+        ):
+            runtime = RuntimeConfig.from_environment()
+        self.assertTrue(runtime.public_status()["jev_review_enabled"])
 
     def test_prototype_runtime_enables_only_home_assistant_timer(self) -> None:
         with patch.dict(

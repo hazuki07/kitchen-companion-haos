@@ -12,6 +12,7 @@ class RuntimeConfig:
     timer_script_entity_id: str = field(default="", repr=False)
     shopping_list_entity_id: str = field(default="", repr=False)
     task_list_entity_id: str = field(default="", repr=False)
+    jev_enabled: bool = False
 
     @classmethod
     def from_environment(cls) -> RuntimeConfig:
@@ -36,11 +37,15 @@ class RuntimeConfig:
         for entity_id in (shopping_list_entity_id, task_list_entity_id):
             if entity_id and not re.fullmatch(r"todo\.[a-z0-9_]+", entity_id):
                 raise ValueError("買い物・タスクリストにはtodo entity IDを指定してください")
+        jev_enabled = os.environ.get("COOKING_ASSISTANT_JEV_ENABLED", "").strip().casefold() in {
+            "1", "true", "yes", "on",
+        }
         return cls(
             mode=mode,
             timer_script_entity_id=timer_script_entity_id,
             shopping_list_entity_id=shopping_list_entity_id,
             task_list_entity_id=task_list_entity_id,
+            jev_enabled=jev_enabled,
         )
 
     def public_status(self) -> dict[str, Any]:
@@ -54,6 +59,7 @@ class RuntimeConfig:
                 "external_write_enabled": False,
                 "shopping_list_enabled": True,
                 "task_list_enabled": True,
+                "jev_review_enabled": self.jev_enabled,
             }
         if self.mode == "prototype":
             return {
@@ -66,6 +72,7 @@ class RuntimeConfig:
                 "external_write_scope": "timer_only",
                 "shopping_list_enabled": False,
                 "task_list_enabled": False,
+                "jev_review_enabled": self.jev_enabled,
             }
         return {
             "mode": self.mode,
@@ -78,6 +85,7 @@ class RuntimeConfig:
             "external_write_scope": "home_assistant_and_mealie_manual",
             "shopping_list_enabled": bool(self.shopping_list_entity_id),
             "task_list_enabled": bool(self.task_list_entity_id),
+            "jev_review_enabled": self.jev_enabled,
         }
 
 

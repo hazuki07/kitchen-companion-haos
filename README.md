@@ -100,6 +100,13 @@ Appにはこのディレクトリが読み取り専用でmountされます。tok
 未設定のリストには書き込みません。複数項目の途中で通信結果が不明になった場合も自動再送しないため、
 Home Assistant側のリストを確認してから再操作してください。
 
+動画URL取り込みのJev検品は任意です。App設定で`jev_enabled: true`にし、`jev_api_key`へ
+TypeSafe API keyを設定すると、「動画から自動入力」を実行した時だけ公開概要欄と抽出候補を
+`https://api.typesafe.ai/v1/systemone`へ送信します。Mealie token、Home Assistant token、保存済み
+レシピは送信しません。API keyは`password`型のApp設定として扱い、画面やログへ表示しません。
+Jevは文章を生成せず、レシピ判定・材料と工程の裏付け・完成までの網羅性を検品します。低信頼または
+通信失敗時は内容を自動補完せず、編集画面の要確認へ回します。既定では無効です。
+
 App設定の`mode`は既定で`stage`です。`home_assistant`への変更は、バックアップと読み取り検証が完了し、
 実環境での接続を明示的に承認した後だけ行います。
 

@@ -353,7 +353,8 @@ async function loadRecipes(query = "") {
 
 async function loadRuntime() {
   state.runtime = await api("/api/runtime");
-  $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label)}`;
+  const jevLabel = state.runtime.jev_review_enabled ? " · Jev検品" : "";
+  $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label + jevLabel)}`;
   renderCatalogStatus();
 }
 
@@ -805,9 +806,11 @@ async function importFromVideo(event) {
       body: JSON.stringify({ url: $("#videoImportUrl").value }),
     });
     openEditor(draft, true);
-    showToast(draft.import_warnings?.length
-      ? "取得できなかった項目があります。要確認の内容を確認してください"
-      : "動画ページのレシピ情報を自動入力しました");
+    showToast(draft.jev_review?.approved
+      ? "動画ページのレシピ情報を自動入力し、Jev検品を通過しました"
+      : draft.import_warnings?.length
+        ? "取得できなかった項目があります。要確認の内容を確認してください"
+        : "動画ページのレシピ情報を自動入力しました");
   } catch (error) { showToast(error.message); }
   finally { button.disabled = false; button.textContent = "動画から自動入力"; }
 }

@@ -87,6 +87,7 @@ class UrllibJsonTransport:
     base_url: str
     token: str = field(repr=False)
     timeout: float = 10
+    max_response_bytes: int = 5_000_000
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.base_url)
@@ -94,6 +95,8 @@ class UrllibJsonTransport:
             raise ValueError("接続先URLが正しくありません")
         if not self.token:
             raise ValueError("接続tokenが設定されていません")
+        if not 1 <= self.max_response_bytes <= 10_000_000:
+            raise ValueError("JSON応答サイズ上限が正しくありません")
 
     def request(
         self,
@@ -121,9 +124,11 @@ class UrllibJsonTransport:
         )
         try:
             with build_opener(RejectRedirectHandler()).open(request, timeout=self.timeout) as response:
-                raw = response.read()
+                raw = response.read(self.max_response_bytes + 1)
         except (HTTPError, URLError, TimeoutError) as exc:
             raise IntegrationError("外部サービスとの通信に失敗しました") from exc
+        if len(raw) > self.max_response_bytes:
+            raise IntegrationError("外部サービスの応答が大きすぎます")
         try:
             return json.loads(raw) if raw else None
         except json.JSONDecodeError as exc:
