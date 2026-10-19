@@ -393,18 +393,23 @@ def _http_url(value: Any) -> str:
 
 
 def _video_url(raw: dict[str, Any]) -> str:
-    for key in ("videoURL", "videoUrl", "video"):
+    for key in (
+        "videoURL", "videoUrl", "video", "recipeVideo", "youtubeURL", "youtubeUrl"
+    ):
         if url := _http_url(raw.get(key)):
             return url
     extras = raw.get("extras") if isinstance(raw.get("extras"), dict) else {}
     for key, value in extras.items():
-        normalized = str(key).casefold().replace("-", "_").replace(" ", "")
-        if normalized in {"video", "video_url", "videourl", "動画", "動画url", "youtube"}:
+        normalized = re.sub(r"[^a-z0-9ぁ-んァ-ヶ一-龠]+", "", str(key).casefold())
+        if normalized in {
+            "video", "videourl", "recipevideo", "youtube", "youtubeurl", "動画", "動画url"
+        }:
             if url := _http_url(value):
                 return url
     source_url = _http_url(raw.get("orgURL"))
-    hostname = (urlparse(source_url).hostname or "").casefold()
-    if hostname in {"youtu.be", "youtube.com", "www.youtube.com", "vimeo.com", "www.vimeo.com"}:
+    hostname = (urlparse(source_url).hostname or "").casefold().removeprefix("www.")
+    hostname = hostname.removeprefix("m.")
+    if hostname in {"youtu.be", "youtube.com", "youtube-nocookie.com", "vimeo.com"}:
         return source_url
     return ""
 
@@ -414,24 +419,55 @@ class MealieReadClient:
         self.transport = transport
 
     def list(self, query: str = "") -> list[dict[str, Any]]:
-        response = self.transport.request(
-            "GET",
-            "/api/recipes",
-            query={
-                "search": query[:160],
-                "page": 1,
-                "perPage": 50,
-                "orderBy": "name",
-                "orderDirection": "asc",
-            },
-        )
-        if not isinstance(response, dict) or not isinstance(response.get("items"), list):
-            raise IntegrationError("Mealieの一覧応答が正しくありません")
-        recipes = []
-        for summary in response["items"]:
-            if not isinstance(summary, dict) or not summary.get("slug"):
-                continue
-            recipes.append(self.get(str(summary["slug"])))
+        recipes: list[dict[str, Any]] = []
+        seen_slugs: set[str] = set()
+        per_page = 50
+        for page in range(1, 21):
+            response = self.transport.request(
+                "GET",
+                "/api/recipes",
+                query={
+                    "search": query[:160],
+                    "page": page,
+                    "perPage": per_page,
+                    "orderBy": "name",
+                    "orderDirection": "asc",
+                },
+            )
+            if not isinstance(response, dict) or not isinstance(response.get("items"), list):
+                raise IntegrationError("Mealieの一覧応答が正しくありません")
+            items = response["items"]
+            new_slugs: list[str] = []
+            for summary in items:
+                if not isinstance(summary, dict) or not summary.get("slug"):
+                    continue
+                slug = str(summary["slug"])
+                if slug in seen_slugs:
+                    continue
+                seen_slugs.add(slug)
+                new_slugs.append(slug)
+            recipes.extend(
+                recipe
+                for slug in new_slugs
+                if (recipe := self.get(slug)) is not None
+            )
+
+            total = response.get("total")
+            total_pages = response.get("total_pages", response.get("pages"))
+            try:
+                total_number = int(total) if total is not None else None
+                page_count = int(total_pages) if total_pages is not None else None
+            except (TypeError, ValueError):
+                total_number = page_count = None
+            if total_number is not None and len(seen_slugs) >= total_number:
+                break
+            if page_count is not None and page >= page_count:
+                break
+            if "next" in response:
+                if not response.get("next"):
+                    break
+            elif len(items) < per_page or not new_slugs:
+                break
         return [recipe for recipe in recipes if recipe is not None]
 
     def get(self, recipe_id: str) -> dict[str, Any] | None:

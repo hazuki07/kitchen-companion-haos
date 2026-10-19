@@ -733,6 +733,29 @@ def youtube_recipe_url(recipe: dict[str, Any]) -> str:
     return ""
 
 
+def known_youtube_creator(recipe: dict[str, Any]) -> str:
+    searchable = unicodedata.normalize(
+        "NFKC",
+        " ".join(
+            [
+                str(recipe.get("title") or ""),
+                str(recipe.get("description") or ""),
+                *[str(tag) for tag in recipe.get("tags", [])],
+            ]
+        ),
+    ).casefold()
+    aliases = (
+        ("ジョージ", ("ジョージ", "george")),
+        ("炊事場", ("炊事場", "suijiba")),
+        ("ファビオ", ("ファビオ", "fabio")),
+        ("おかずJAPAN", ("おかずjapan", "okazu japan", "okazujapan")),
+    )
+    return next(
+        (label for label, tokens in aliases if any(token in searchable for token in tokens)),
+        "動画URL",
+    )
+
+
 def youtube_reimport_candidates(
     catalog: RecipeReader, store: RecipeStore
 ) -> dict[str, Any]:
@@ -754,6 +777,7 @@ def youtube_reimport_candidates(
             {
                 "id": mealie_slug,
                 "title": str(recipe.get("title") or "名称未確認")[:160],
+                "creator": known_youtube_creator(recipe),
                 "source_url": source_url,
                 "draft_id": draft_id if draft else "",
                 "draft_status": (
@@ -762,6 +786,13 @@ def youtube_reimport_candidates(
                 ),
             }
         )
+    creator_order = {"ジョージ": 0, "炊事場": 1, "ファビオ": 2, "おかずJAPAN": 3, "動画URL": 4}
+    entries.sort(
+        key=lambda entry: (
+            creator_order.get(str(entry["creator"]), 4),
+            str(entry["title"]).casefold(),
+        )
+    )
     return {"count": len(entries), "entries": entries}
 
 
@@ -857,7 +888,7 @@ def canonical_recipe_source(recipe: dict[str, Any]) -> str:
         except ValueError:
             continue
         hostname = (parsed.hostname or "").casefold()
-        hostname = hostname.removeprefix("www.").removeprefix("m.")
+        hostname = hostname.removeprefix("www.").removeprefix("m.").removeprefix("music.")
         video_id = ""
         if hostname == "youtu.be":
             video_id = parsed.path.strip("/").split("/", 1)[0]
@@ -865,7 +896,7 @@ def canonical_recipe_source(recipe: dict[str, Any]) -> str:
             video_id = parse_qs(parsed.query).get("v", [""])[0]
             if not video_id:
                 parts = [part for part in parsed.path.split("/") if part]
-                if len(parts) >= 2 and parts[0] in {"embed", "live", "shorts"}:
+                if len(parts) >= 2 and parts[0] in {"embed", "live", "shorts", "v"}:
                     video_id = parts[1]
         if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
             return f"youtube:{video_id}"
