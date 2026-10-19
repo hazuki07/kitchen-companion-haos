@@ -24,6 +24,7 @@ const state = {
   sourceFilter: "all",
   catalogStatus: null,
   bundleImport: null,
+  youtubeReimport: null,
   quantityMode: "recipe",
   cookTab: "step",
   shoppingSuggestions: [],
@@ -524,6 +525,10 @@ function renderDetail() {
   const normalizeButton = recipe.read_only && recipe.source_kind === "mealie" && state.runtime?.mealie_sync_enabled
     ? '<button class="secondary-button" data-action="normalize-current">分量を正規化</button>'
     : "";
+  const reimportButton = recipe.read_only && recipe.source_kind === "mealie"
+    && (videoEmbedUrl(recipe.video_url) || videoEmbedUrl(recipe.source_url))
+    ? '<button class="secondary-button" data-action="reimport-current">動画から再取り込み</button>'
+    : "";
   const shoppingKey = `${recipe.id}:shopping`;
   const taskKey = `${recipe.id}:tasks`;
   const shoppingBlocked = state.listOutcomeUnknown.has(shoppingKey);
@@ -547,7 +552,7 @@ function renderDetail() {
           <button class="${showingGuidance ? "" : "active"}" data-quantity-mode="recipe" aria-pressed="${!showingGuidance}">メニューの分量</button>
           <button class="${showingGuidance ? "active" : ""}" data-quantity-mode="guidance" aria-pressed="${showingGuidance}" ${guidance.length ? "" : "disabled"}>1人分の適量</button>
         </div>
-        <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button>${shoppingButton}${taskButton}<button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button>${normalizeButton}${syncButton}${deleteControl}</div>
+        <div class="detail-actions"><button class="primary-button" data-action="start-cooking">調理をはじめる</button>${shoppingButton}${taskButton}<button class="secondary-button" data-action="edit-current">${recipe.read_only ? "下書きにコピー" : "編集する"}</button>${reimportButton}${normalizeButton}${syncButton}${deleteControl}</div>
       </div>
     </div>
     ${embeddedVideo ? `<section class="video-panel"><div class="video-frame"><iframe src="${escapeHtml(embeddedVideo)}" title="${escapeHtml(recipe.title)}の料理動画" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" sandbox="allow-scripts allow-same-origin allow-presentation" allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe></div><a class="source-link" href="${escapeHtml(video)}" target="_blank" rel="noopener noreferrer">動画を別画面で開く</a></section>` : ""}
@@ -623,6 +628,65 @@ async function normalizeCurrentRecipe(button) {
     button.disabled = false;
     showToast(error.message);
   }
+}
+
+function renderYoutubeReimportPreview(preview) {
+  state.youtubeReimport = preview;
+  const element = $("#youtubeReimportReview");
+  const entries = Array.isArray(preview.entries) ? preview.entries : [];
+  element.innerHTML = `<strong>再取り込み対象 ${entries.length}件</strong>
+    <p>各レシピを再取得するとローカル下書きが開きます。内容を確認・保存した後に、Mealieへ同期してください。</p>
+    <ul>${entries.map((entry) => `<li>${escapeHtml(entry.title)}
+      <button class="secondary-button" type="button" data-reimport-id="${escapeHtml(entry.id)}">${entry.draft_status === "review" ? "下書きを確認" : "再取り込み"}</button>
+    </li>`).join("")}</ul>`;
+  element.classList.remove("hidden");
+}
+
+async function previewYoutubeReimport(button) {
+  button.disabled = true;
+  button.textContent = "対象を確認中…";
+  try {
+    const preview = await api("/api/reimport/youtube/preview");
+    renderYoutubeReimportPreview(preview);
+    showToast(`YouTube由来の既存レシピは${preview.count}件です`);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "対象レシピを再確認";
+  }
+}
+
+async function reimportYoutubeRecipe(recipeId, button) {
+  if (!recipeId) return;
+  button.disabled = true;
+  button.textContent = "再取得中…";
+  try {
+    const draft = await api(`/api/catalog/recipes/${encodeURIComponent(recipeId)}/reimport-video`, {
+      method: "POST",
+    });
+    await loadRecipes();
+    openEditor(draft, true);
+    showToast(draft.reimport_status === "existing_draft"
+      ? "確認中の下書きを開きました"
+      : draft.import_warnings?.length
+        ? "再取り込みしました。要確認項目を確認してください"
+        : "再取り込みしました。内容を確認してください");
+    if (state.youtubeReimport) {
+      const entry = state.youtubeReimport.entries.find((item) => item.id === recipeId);
+      if (entry) entry.draft_status = "review";
+      renderYoutubeReimportPreview(state.youtubeReimport);
+    }
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "再取り込み";
+    showToast(error.message);
+  }
+}
+
+function reimportCurrentRecipe(button) {
+  if (!state.selected?.id) return;
+  reimportYoutubeRecipe(state.selected.id, button);
 }
 
 async function verifyMealieSync(button) {
@@ -742,9 +806,14 @@ function openEditor(recipe = null, videoOnly = false) {
   $("#sourceField").value = recipe?.source_url || "";
   $("#videoField").value = recipe?.video_url || "";
   const importWarnings = Array.isArray(recipe?.import_warnings) ? recipe.import_warnings : [];
-  $("#formMessage").textContent = importWarnings.length
-    ? `要確認：${importWarnings.join("／")}`
+  const comparison = recipe?.reimport_comparison;
+  const comparisonMessage = comparison
+    ? `再取り込み差分：材料 ${comparison.previous_ingredient_count}→${comparison.new_ingredient_count}件、工程 ${comparison.previous_step_count}→${comparison.new_step_count}件、基準人数 ${comparison.previous_servings ?? "未確認"}→${comparison.new_servings ?? "未確認"}`
     : "";
+  $("#formMessage").textContent = [
+    importWarnings.length ? `要確認：${importWarnings.join("／")}` : "",
+    comparisonMessage,
+  ].filter(Boolean).join("\n");
   updatePortionFields();
   $("#editorDialog").showModal();
   setTimeout(() => (videoOnly ? $("#videoField") : $("#titleField")).focus(), 50);
@@ -1453,6 +1522,7 @@ document.addEventListener("click", (event) => {
     const recipe = state.recipes.find((item) => item.id === target.dataset.open);
     if (recipe) openDetail(recipe);
   }
+  if (target.dataset.reimportId) reimportYoutubeRecipe(target.dataset.reimportId, target);
   if (target.dataset.query != null) { $("#searchInput").value = target.dataset.query; loadRecipes(target.dataset.query); }
   if (target.dataset.shoppingMood != null) {
     $("#shoppingMood").value = target.dataset.shoppingMood;
@@ -1489,6 +1559,8 @@ document.addEventListener("click", (event) => {
     "close-editor": () => $("#editorDialog").close(),
     "edit-current": () => openEditor(state.selected.read_only ? { ...state.selected, id: "" } : state.selected),
     "normalize-current": () => normalizeCurrentRecipe(target),
+    "reimport-current": () => reimportCurrentRecipe(target),
+    "preview-youtube-reimport": () => previewYoutubeReimport(target),
     "verify-mealie": () => verifyMealieSync(target),
     "sync-mealie": () => syncCurrentRecipe(target),
     "add-shopping-list": () => addSelectedRecipeToList("shopping", target),

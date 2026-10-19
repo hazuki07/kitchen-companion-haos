@@ -725,6 +725,108 @@ def create_normalized_draft(
     return store.get(draft_id) or draft
 
 
+def youtube_recipe_url(recipe: dict[str, Any]) -> str:
+    for key in ("video_url", "source_url"):
+        raw_url = str(recipe.get(key) or "").strip()
+        if raw_url and canonical_recipe_source({key: raw_url}).startswith("youtube:"):
+            return raw_url
+    return ""
+
+
+def youtube_reimport_candidates(
+    catalog: RecipeReader, store: RecipeStore
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    for recipe in catalog.list():
+        mealie_slug = str(recipe.get("id") or "")
+        source_url = youtube_recipe_url(recipe)
+        if (
+            recipe.get("source_kind") != "mealie"
+            or not re.fullmatch(r"[a-zA-Z0-9_-]+", mealie_slug)
+            or not source_url
+        ):
+            continue
+        draft_id = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f"kitchen-companion:mealie:{mealie_slug}")
+        )
+        draft = store.get(draft_id)
+        entries.append(
+            {
+                "id": mealie_slug,
+                "title": str(recipe.get("title") or "名称未確認")[:160],
+                "source_url": source_url,
+                "draft_id": draft_id if draft else "",
+                "draft_status": (
+                    "synced" if draft and draft.get("mealie_sync_status") == "synced"
+                    else "review" if draft else "new"
+                ),
+            }
+        )
+    return {"count": len(entries), "entries": entries}
+
+
+def create_youtube_reimport_draft(
+    store: RecipeStore,
+    mealie_recipe: dict[str, Any],
+    mealie_slug: str,
+    imported: dict[str, Any],
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", mealie_slug):
+        raise ValueError("Mealie recipe slugが正しくありません")
+    if not youtube_recipe_url(mealie_recipe):
+        raise ValueError("YouTube由来のMealieレシピではありません")
+    draft_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"kitchen-companion:mealie:{mealie_slug}"))
+    existing = store.get(draft_id)
+    if existing and existing.get("mealie_sync_status") != "synced":
+        return {
+            **existing,
+            "import_warnings": ["確認中の再取り込み下書きがあります"],
+            "reimport_status": "existing_draft",
+        }
+
+    preserve_fields = (
+        "portion_kind", "serving_volume_ml", "dilution_concentrate_parts",
+        "dilution_mixer_parts", "meat_g_per_person", "rice_go_per_person",
+    )
+    draft = store.save(
+        {
+            **imported,
+            **{
+                key: mealie_recipe[key]
+                for key in preserve_fields
+                if mealie_recipe.get(key) is not None
+            },
+            "image_url": imported.get("image_url") or mealie_recipe.get("image_url") or "",
+            "tags": list(
+                dict.fromkeys(
+                    [
+                        *[str(tag) for tag in mealie_recipe.get("tags", [])],
+                        *[str(tag) for tag in imported.get("tags", [])],
+                    ]
+                )
+            )[:30],
+        },
+        draft_id,
+    )
+    store.set_origin_mealie_slug(draft_id, mealie_slug)
+    result = store.get(draft_id) or draft
+    return {
+        **result,
+        "import_warnings": list(imported.get("import_warnings") or []),
+        "jev_review": imported.get("jev_review"),
+        "reimport_comparison": {
+            "previous_title": str(mealie_recipe.get("title") or ""),
+            "previous_servings": mealie_recipe.get("servings"),
+            "new_servings": result.get("servings"),
+            "previous_ingredient_count": len(mealie_recipe.get("ingredients") or []),
+            "new_ingredient_count": len(result.get("ingredients") or []),
+            "previous_step_count": len(mealie_recipe.get("steps") or []),
+            "new_step_count": len(result.get("steps") or []),
+        },
+        "reimport_status": "created",
+    }
+
+
 def ingredient_amounts_match(local: dict[str, Any], remote: dict[str, Any]) -> bool:
     def semantic(recipe: dict[str, Any]) -> list[tuple[Any, ...]]:
         result = []
@@ -1525,6 +1627,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if parsed.path == "/api/reimport/youtube/preview":
+            try:
+                preview = youtube_reimport_candidates(self.catalog, self.store)
+            except IntegrationError:
+                self.json_response({"error": "Mealieから対象レシピを取得できませんでした"}, 502)
+                return
+            self.json_response(preview)
+            return
         image_match = re.fullmatch(r"/api/catalog/images/([a-fA-F0-9-]{8,64})", parsed.path)
         if image_match:
             if not self.images:
@@ -1560,7 +1670,38 @@ class AppHandler(BaseHTTPRequestHandler):
             normalize_match = re.fullmatch(
                 r"/api/catalog/recipes/([a-zA-Z0-9_-]+)/normalize", self.path
             )
-            if normalize_match:
+            reimport_match = re.fullmatch(
+                r"/api/catalog/recipes/([a-zA-Z0-9_-]+)/reimport-video", self.path
+            )
+            if reimport_match:
+                mealie_slug = reimport_match.group(1)
+                recipe = self.catalog.get(mealie_slug)
+                if not recipe or recipe.get("source_kind") != "mealie":
+                    self.json_response({"error": "再取り込みするMealieレシピが見つかりません"}, 404)
+                    return
+                source_url = youtube_recipe_url(recipe)
+                if not source_url:
+                    self.json_response({"error": "YouTube由来のレシピではありません"}, 409)
+                    return
+                draft_id = str(
+                    uuid.uuid5(uuid.NAMESPACE_URL, f"kitchen-companion:mealie:{mealie_slug}")
+                )
+                existing = self.store.get(draft_id)
+                if existing and existing.get("mealie_sync_status") != "synced":
+                    self.json_response(
+                        {
+                            **existing,
+                            "import_warnings": ["確認中の再取り込み下書きがあります"],
+                            "reimport_status": "existing_draft",
+                        }
+                    )
+                    return
+                imported = import_video(source_url, self.jev_reviewer)
+                draft = create_youtube_reimport_draft(
+                    self.store, recipe, mealie_slug, imported
+                )
+                self.json_response(draft, HTTPStatus.CREATED)
+            elif normalize_match:
                 mealie_slug = normalize_match.group(1)
                 recipe = self.catalog.get(mealie_slug)
                 if not recipe or recipe.get("source_kind") != "mealie":
