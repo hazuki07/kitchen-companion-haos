@@ -353,7 +353,8 @@ async function loadRecipes(query = "") {
 
 async function loadRuntime() {
   state.runtime = await api("/api/runtime");
-  $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label)}`;
+  const jevLabel = state.runtime.jev_review_enabled ? " · Jev検品" : "";
+  $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label + jevLabel)}`;
   renderCatalogStatus();
 }
 
@@ -740,7 +741,10 @@ function openEditor(recipe = null, videoOnly = false) {
   )).join("\n") || "";
   $("#sourceField").value = recipe?.source_url || "";
   $("#videoField").value = recipe?.video_url || "";
-  $("#formMessage").textContent = "";
+  const importWarnings = Array.isArray(recipe?.import_warnings) ? recipe.import_warnings : [];
+  $("#formMessage").textContent = importWarnings.length
+    ? `要確認：${importWarnings.join("／")}`
+    : "";
   updatePortionFields();
   $("#editorDialog").showModal();
   setTimeout(() => (videoOnly ? $("#videoField") : $("#titleField")).focus(), 50);
@@ -802,9 +806,11 @@ async function importFromVideo(event) {
       body: JSON.stringify({ url: $("#videoImportUrl").value }),
     });
     openEditor(draft, true);
-    showToast(draft.ingredients.length || draft.steps.length
-      ? "動画ページのレシピ情報を自動入力しました"
-      : "動画情報を入力しました。材料と工程を確認してください");
+    showToast(draft.jev_review?.approved
+      ? "動画ページのレシピ情報を自動入力し、Jev検品を通過しました"
+      : draft.import_warnings?.length
+        ? "取得できなかった項目があります。要確認の内容を確認してください"
+        : "動画ページのレシピ情報を自動入力しました");
   } catch (error) { showToast(error.message); }
   finally { button.disabled = false; button.textContent = "動画から自動入力"; }
 }
@@ -1563,9 +1569,23 @@ function registerWebMcpTools() {
       ingredients: {
         type: "array",
         maxItems: 200,
+        description: "概要欄に記載された材料を省略せず格納します。出典にない材料や分量は推測しません。",
         items: { type: "object", additionalProperties: true },
       },
-      steps: { type: "array", maxItems: 100, items: { type: "string" } },
+      ingredients_complete: {
+        type: "boolean",
+        description: "公開概要欄の材料セクションを最後まで照合した場合だけtrueにします。",
+      },
+      steps: {
+        type: "array",
+        maxItems: 100,
+        description: "動画や出典を冒頭から完成まで確認した工程です。途中までの要約を完全な工程として扱いません。",
+        items: { type: "string" },
+      },
+      steps_complete: {
+        type: "boolean",
+        description: "動画または出典を料理の完成まで確認し、工程が途中で切れていない場合だけtrueにします。",
+      },
       step_video_timestamps: {
         type: "array",
         maxItems: 100,
@@ -1696,7 +1716,7 @@ function registerWebMcpTools() {
   registration({
     name: "preview_reviewed_recipe_bundle",
     title: "レビュー済みレシピの重複確認",
-    description: "Mealieとローカル下書きを読み取り、確認済みレシピを保存せずに重複判定します。保存前に必ず実行してください。",
+    description: "Mealieとローカル下書きを読み取り、確認済みレシピを保存せずに重複判定します。材料は完全な公開概要欄と照合し、工程は動画または出典を料理の完成まで確認してください。確認できない内容は推測せずunresolved_fieldsへ記録し、保存前に必ずこのツールを実行してください。",
     inputSchema: {
       type: "object",
       properties: {

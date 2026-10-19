@@ -1,5 +1,5 @@
 name: Kitchen Companion
-version: "0.1.24"
+version: "0.1.26"
 slug: kitchen_companion
 description: 音声と大きな画面で調理を案内する、タブレット向け料理アシスタント
 arch:
@@ -24,8 +24,12 @@ options:
   timer_script_entity_id: ""
   shopping_list_entity_id: "todo.shopping_list"
   task_list_entity_id: ""
+  jev_enabled: false
+  jev_api_key: ""
 schema:
   mode: list(stage|prototype|home_assistant)
   timer_script_entity_id: str
   shopping_list_entity_id: str
   task_list_entity_id: str
+  jev_enabled: bool
+  jev_api_key: password
