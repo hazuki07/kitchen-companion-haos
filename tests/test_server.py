@@ -427,6 +427,24 @@ class RecipeTests(unittest.TestCase):
                         "source_url": "https://recipes.example.invalid/item",
                     },
                     {
+                        "id": "youtube-channel",
+                        "title": "チャンネルURL",
+                        "source_kind": "mealie",
+                        "source_url": "https://www.youtube.com/channel/UC1234567890",
+                    },
+                    {
+                        "id": "youtube-playlist",
+                        "title": "再生リストURL",
+                        "source_kind": "mealie",
+                        "source_url": "https://www.youtube.com/playlist?list=PL1234567890",
+                    },
+                    {
+                        "id": "invalid-youtube-video",
+                        "title": "不正な動画ID",
+                        "source_kind": "mealie",
+                        "video_url": "https://www.youtube.com/watch?v=short",
+                    },
+                    {
                         "id": "local-youtube",
                         "title": "ローカル下書き",
                         "source_kind": "draft",
@@ -444,10 +462,12 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(preview["count"], 5)
         self.assertEqual(preview["mealie_count"], 4)
         self.assertEqual(preview["draft_count"], 1)
+        self.assertEqual(preview["youtube_url_count"], 5)
+        self.assertEqual(preview["unknown_creator_count"], 1)
         self.assertEqual(preview["entries"][0]["id"], "youtube-recipe")
         self.assertEqual(
             [entry["creator"] for entry in preview["entries"]],
-            ["ジョージ", "炊事場", "ファビオ", "おかずJAPAN", "動画URL"],
+            ["ジョージ", "炊事場", "ファビオ", "おかずJAPAN", "提供元未判定"],
         )
         self.assertEqual(preview["entries"][-1]["draft_status"], "local")
 

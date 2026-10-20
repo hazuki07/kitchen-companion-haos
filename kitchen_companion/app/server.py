@@ -754,7 +754,7 @@ def known_youtube_creator(recipe: dict[str, Any]) -> str:
     )
     return next(
         (label for label, tokens in aliases if any(token in searchable for token in tokens)),
-        "動画URL",
+        "提供元未判定",
     )
 
 
@@ -777,7 +777,7 @@ def youtube_reimport_candidates(
         if previous and previous["source_kind"] == "draft":
             continue
         creator = known_youtube_creator(recipe)
-        if previous and creator == "動画URL":
+        if previous and creator == "提供元未判定":
             creator = str(previous["creator"])
         if source_kind == "draft":
             draft_id = recipe_id
@@ -801,7 +801,13 @@ def youtube_reimport_candidates(
             "draft_status": draft_status,
         }
     entries = list(entries_by_source.values())
-    creator_order = {"ジョージ": 0, "炊事場": 1, "ファビオ": 2, "おかずJAPAN": 3, "動画URL": 4}
+    creator_order = {
+        "ジョージ": 0,
+        "炊事場": 1,
+        "ファビオ": 2,
+        "おかずJAPAN": 3,
+        "提供元未判定": 4,
+    }
     entries.sort(
         key=lambda entry: (
             creator_order.get(str(entry["creator"]), 4),
@@ -810,8 +816,12 @@ def youtube_reimport_candidates(
     )
     return {
         "count": len(entries),
+        "youtube_url_count": len(entries),
         "mealie_count": sum(entry["source_kind"] == "mealie" for entry in entries),
         "draft_count": sum(entry["source_kind"] == "draft" for entry in entries),
+        "unknown_creator_count": sum(
+            entry["creator"] == "提供元未判定" for entry in entries
+        ),
         "entries": entries,
     }
 
