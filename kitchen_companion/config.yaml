@@ -1,5 +1,5 @@
 name: Kitchen Companion
-version: "0.1.32"
+version: "0.1.33"
 slug: kitchen_companion
 description: 音声と大きな画面で調理を案内する、タブレット向け料理アシスタント
 arch:
@@ -26,6 +26,9 @@ options:
   task_list_entity_id: ""
   jev_enabled: false
   jev_api_key: ""
+  openai_generation_enabled: false
+  openai_model: "gpt-6-luna"
+  openai_api_key: ""
 schema:
   mode: list(stage|prototype|home_assistant)
   timer_script_entity_id: str
@@ -33,3 +36,6 @@ schema:
   task_list_entity_id: str
   jev_enabled: bool
   jev_api_key: password
+  openai_generation_enabled: bool
+  openai_model: str
+  openai_api_key: password

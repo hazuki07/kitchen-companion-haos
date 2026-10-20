@@ -358,7 +358,10 @@ async function loadRecipes(query = "") {
 async function loadRuntime() {
   state.runtime = await api("/api/runtime");
   const jevLabel = state.runtime.jev_review_enabled ? " · Jev検品" : "";
-  $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label + jevLabel)}`;
+  const generationLabel = state.runtime.openai_generation_enabled
+    ? ` · AI工程生成（${state.runtime.openai_model}）`
+    : "";
+  $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label + generationLabel + jevLabel)}`;
   renderCatalogStatus();
 }
 
@@ -948,8 +951,19 @@ function openEditor(recipe = null, videoOnly = false) {
   const comparisonMessage = comparison
     ? `再取り込み差分：材料 ${comparison.previous_ingredient_count}→${comparison.new_ingredient_count}件、工程 ${comparison.previous_step_count}→${comparison.new_step_count}件、基準人数 ${comparison.previous_servings ?? "未確認"}→${comparison.new_servings ?? "未確認"}`
     : "";
+  const generationStatus = {
+    approved: "Jev承認",
+    review_required: "要手動確認",
+    source_incomplete: "出典工程が不十分",
+    review_unavailable: "Jev検品未完了",
+    unavailable: "生成未完了",
+  }[recipe?.generation_status] || "";
+  const generationMessage = generationStatus
+    ? `動画要約・工程生成：${generationStatus}（${recipe.generation_attempts?.length || 0}回）${recipe.generation_summary ? `\n要約：${recipe.generation_summary}` : ""}`
+    : "";
   $("#formMessage").textContent = [
     importWarnings.length ? `要確認：${importWarnings.join("／")}` : "",
+    generationMessage,
     ingredientComparisonMessage,
     comparisonMessage,
   ].filter(Boolean).join("\n");

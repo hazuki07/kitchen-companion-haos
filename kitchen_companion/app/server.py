@@ -35,6 +35,7 @@ from .clients import (
     MealieSyncClient,
     UrllibJsonTransport,
 )
+from .generation import OpenAIRecipeStepGenerator, RecipeStepGenerator
 from .integrations import (
     RuntimeConfig,
     StageCookingController,
@@ -850,6 +851,9 @@ def prepare_local_youtube_reimport(
         "read_only": False,
         "import_warnings": list(imported.get("import_warnings") or []),
         "jev_review": imported.get("jev_review"),
+        "generation_summary": imported.get("generation_summary"),
+        "generation_status": imported.get("generation_status"),
+        "generation_attempts": imported.get("generation_attempts"),
         "reimport_comparison": reimport_comparison(existing, merged),
         "reimport_status": "preview",
     }
@@ -905,6 +909,9 @@ def create_youtube_reimport_draft(
         **result,
         "import_warnings": list(imported.get("import_warnings") or []),
         "jev_review": imported.get("jev_review"),
+        "generation_summary": imported.get("generation_summary"),
+        "generation_status": imported.get("generation_status"),
+        "generation_attempts": imported.get("generation_attempts"),
         "reimport_comparison": reimport_comparison(mealie_recipe, result),
         "reimport_status": "created",
     }
@@ -1772,6 +1779,131 @@ def with_jev_import_review(
     return result
 
 
+def _step_review_feedback(review: dict[str, Any], threshold: float) -> list[str]:
+    feedback: list[str] = []
+    if (review.get("steps_grounded") or 0) < threshold:
+        feedback.append(
+            "候補工程に出典で裏付けられない内容または省略があります。要約と工程を出典だけから作り直してください"
+        )
+    if (review.get("needs_human_review") or 0) >= 1 - threshold:
+        feedback.append(
+            "工程に曖昧さがあります。確定できない内容は推測せず未確認として分離してください"
+        )
+    return feedback
+
+
+def with_generated_step_review(
+    recipe: dict[str, Any],
+    source_text: str,
+    generator: RecipeStepGenerator,
+    reviewer: RecipeImportReviewer,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    if not 1 <= max_attempts <= 3:
+        raise ValueError("工程生成の試行回数が正しくありません")
+    feedback: list[str] = []
+    latest = dict(recipe)
+    attempts: list[dict[str, Any]] = []
+    for attempt in range(1, max_attempts + 1):
+        try:
+            generated = generator.generate(source_text, latest, feedback)
+        except IntegrationError:
+            warnings = list(latest.get("import_warnings") or [])
+            warnings.append("OpenAIによる動画要約・工程生成を完了できませんでした")
+            return {
+                **latest,
+                "import_warnings": list(dict.fromkeys(warnings)),
+                "generation_status": "unavailable",
+                "generation_attempts": attempts,
+            }
+
+        steps = [str(item.get("text") or "").strip() for item in generated["steps"]]
+        timestamps = [item.get("start_seconds") for item in generated["steps"]]
+        base_warnings = [
+            warning
+            for warning in latest.get("import_warnings", [])
+            if "構造化データに作り方がありません" not in warning
+            and "工程は公開字幕の調理発話から抽出" not in warning
+            and "Jevでは料理完成までの工程" not in warning
+            and "Jevでは取り込んだ工程" not in warning
+            and "Jevが人による確認" not in warning
+        ]
+        candidate = {
+            **latest,
+            "steps": steps,
+            "step_video_timestamps": timestamps,
+            "import_warnings": base_warnings,
+        }
+        reviewed = with_jev_import_review(candidate, source_text, reviewer)
+        review = reviewed.get("jev_review") or {}
+        threshold = float(getattr(reviewer, "threshold", 0.75))
+        is_recipe = (
+            review.get("decision") == "recipe"
+            and (review.get("recipe_probability") or 0) >= threshold
+        )
+        source_complete = (review.get("source_steps_complete") or 0) >= threshold
+        grounded = (review.get("steps_grounded") or 0) >= threshold
+        low_human_review = (
+            review.get("needs_human_review") is not None
+            and review["needs_human_review"] < 1 - threshold
+        )
+        unresolved = list(generated.get("unresolved") or [])
+        unresolved_steps = any(item.get("unresolved") for item in generated["steps"])
+        if review.get("status") == "unavailable":
+            attempt_status = "review_unavailable"
+        elif (
+            is_recipe
+            and steps
+            and source_complete
+            and grounded
+            and low_human_review
+            and not unresolved
+            and not unresolved_steps
+        ):
+            attempt_status = "approved"
+        elif not source_complete:
+            attempt_status = "source_incomplete"
+        else:
+            attempt_status = "review_required"
+        attempts.append(
+            {
+                "attempt": attempt,
+                "status": attempt_status,
+                "step_count": len(steps),
+            }
+        )
+        latest = {
+            **reviewed,
+            "generation_summary": generated["summary"],
+            "generation_status": attempt_status,
+            "generation_attempts": attempts,
+        }
+        if unresolved:
+            latest["import_warnings"] = list(
+                dict.fromkeys(
+                    [
+                        *latest["import_warnings"],
+                        f"工程生成の未確認項目: {'／'.join(unresolved)}",
+                    ]
+                )
+            )
+        if attempt_status == "approved":
+            return latest
+        if review.get("status") == "unavailable" or not is_recipe or not source_complete:
+            return latest
+        feedback = _step_review_feedback(review, threshold)
+        if unresolved or unresolved_steps:
+            feedback.append("未確認項目を解消できない場合は工程へ推測を入れず、未確認のまま残してください")
+        if not feedback:
+            return latest
+
+    warnings = list(latest.get("import_warnings") or [])
+    warnings.append("工程生成は3回のJev検品で承認されなかったため、手動確認が必要です")
+    latest["import_warnings"] = list(dict.fromkeys(warnings))
+    latest["generation_status"] = "review_required"
+    return latest
+
+
 def video_draft_from_html(
     url: str, html: str, caption_segments: list[tuple[int, str]] | None = None
 ) -> dict[str, Any]:
@@ -1882,7 +2014,11 @@ def import_recipe(url: str) -> dict[str, Any]:
     return recipe_draft_from_node(node, url)
 
 
-def import_video(url: str, reviewer: RecipeImportReviewer | None = None) -> dict[str, Any]:
+def import_video(
+    url: str,
+    reviewer: RecipeImportReviewer | None = None,
+    generator: RecipeStepGenerator | None = None,
+) -> dict[str, Any]:
     url, html = fetch_public_html(url, "動画")
     caption_segments: list[tuple[int, str]] = []
     caption_url = youtube_caption_track_url(html)
@@ -1899,6 +2035,8 @@ def import_video(url: str, reviewer: RecipeImportReviewer | None = None) -> dict
     source_text = "\n\n".join(
         part for part in (description, f"公開字幕:\n{transcript}" if transcript else "") if part
     )[:30_000]
+    if generator is not None:
+        return with_generated_step_review(draft, source_text, generator, reviewer)
     return with_jev_import_review(draft, source_text, reviewer)
 
 
@@ -1912,6 +2050,7 @@ class AppHandler(BaseHTTPRequestHandler):
     images: MealieImageClient | None
     mealie_sync: MealieSyncClient | None
     jev_reviewer: RecipeImportReviewer | None
+    step_generator: RecipeStepGenerator | None
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"{self.address_string()} - {fmt % args}")
@@ -2056,7 +2195,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 if not source_url:
                     self.json_response({"error": "YouTube由来のレシピではありません"}, 409)
                     return
-                imported = import_video(source_url, self.jev_reviewer)
+                imported = import_video(source_url, self.jev_reviewer, self.step_generator)
                 if recipe.get("source_kind") == "draft":
                     self.json_response(prepare_local_youtube_reimport(recipe, imported))
                     return
@@ -2094,7 +2233,11 @@ class AppHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/import/video":
                 data = self.body()
                 self.json_response(
-                    import_video(str(data.get("url", "")), self.jev_reviewer)
+                    import_video(
+                        str(data.get("url", "")),
+                        self.jev_reviewer,
+                        self.step_generator,
+                    )
                 )
             elif self.path == "/api/import/bundle/preview":
                 self.json_response(preview_review_bundle(self.body(), self.catalog))
@@ -2448,6 +2591,7 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
     runtime = RuntimeConfig.from_environment()
     store = RecipeStore(db_path)
     jev_reviewer: RecipeImportReviewer | None = None
+    step_generator: RecipeStepGenerator | None = None
     if runtime.jev_enabled:
         jev_api_key = os.environ.get("TYPESAFE_API_KEY", "").strip()
         if not jev_api_key:
@@ -2459,6 +2603,21 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
                 timeout=12,
                 max_response_bytes=500_000,
             )
+        )
+    if runtime.openai_generation_enabled:
+        if jev_reviewer is None:
+            raise ValueError("OpenAI工程生成を有効にするにはJev検品も有効にしてください")
+        openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not openai_api_key:
+            raise ValueError("OpenAI工程生成を有効にするにはOpenAI API keyが必要です")
+        step_generator = OpenAIRecipeStepGenerator(
+            UrllibJsonTransport(
+                "https://api.openai.com",
+                openai_api_key,
+                timeout=60,
+                max_response_bytes=1_000_000,
+            ),
+            model=runtime.openai_model,
         )
     if runtime.mode in {"stage", "prototype"}:
         recipe_reader: RecipeReader = MockMealieCatalog(MOCK_MEALIE_FIXTURE)
@@ -2512,6 +2671,7 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
             "images": images,
             "mealie_sync": mealie_sync,
             "jev_reviewer": jev_reviewer,
+            "step_generator": step_generator,
         },
     )
     return ThreadingHTTPServer((host, port), handler)

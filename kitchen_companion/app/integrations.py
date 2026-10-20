@@ -13,6 +13,8 @@ class RuntimeConfig:
     shopping_list_entity_id: str = field(default="", repr=False)
     task_list_entity_id: str = field(default="", repr=False)
     jev_enabled: bool = False
+    openai_generation_enabled: bool = False
+    openai_model: str = "gpt-6-luna"
 
     @classmethod
     def from_environment(cls) -> RuntimeConfig:
@@ -40,12 +42,22 @@ class RuntimeConfig:
         jev_enabled = os.environ.get("COOKING_ASSISTANT_JEV_ENABLED", "").strip().casefold() in {
             "1", "true", "yes", "on",
         }
+        openai_generation_enabled = os.environ.get(
+            "COOKING_ASSISTANT_OPENAI_GENERATION_ENABLED", ""
+        ).strip().casefold() in {"1", "true", "yes", "on"}
+        openai_model = os.environ.get(
+            "COOKING_ASSISTANT_OPENAI_MODEL", "gpt-6-luna"
+        ).strip()
+        if not re.fullmatch(r"gpt-[a-zA-Z0-9._-]+", openai_model):
+            raise ValueError("OpenAI model名が正しくありません")
         return cls(
             mode=mode,
             timer_script_entity_id=timer_script_entity_id,
             shopping_list_entity_id=shopping_list_entity_id,
             task_list_entity_id=task_list_entity_id,
             jev_enabled=jev_enabled,
+            openai_generation_enabled=openai_generation_enabled,
+            openai_model=openai_model,
         )
 
     def public_status(self) -> dict[str, Any]:
@@ -60,6 +72,8 @@ class RuntimeConfig:
                 "shopping_list_enabled": True,
                 "task_list_enabled": True,
                 "jev_review_enabled": self.jev_enabled,
+                "openai_generation_enabled": self.openai_generation_enabled,
+                "openai_model": self.openai_model,
             }
         if self.mode == "prototype":
             return {
@@ -73,6 +87,8 @@ class RuntimeConfig:
                 "shopping_list_enabled": False,
                 "task_list_enabled": False,
                 "jev_review_enabled": self.jev_enabled,
+                "openai_generation_enabled": self.openai_generation_enabled,
+                "openai_model": self.openai_model,
             }
         return {
             "mode": self.mode,
@@ -86,6 +102,8 @@ class RuntimeConfig:
             "shopping_list_enabled": bool(self.shopping_list_entity_id),
             "task_list_enabled": bool(self.task_list_entity_id),
             "jev_review_enabled": self.jev_enabled,
+            "openai_generation_enabled": self.openai_generation_enabled,
+            "openai_model": self.openai_model,
         }
 
 
