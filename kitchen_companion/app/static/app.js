@@ -641,15 +641,20 @@ function renderYoutubeReimportPreview(preview) {
   const element = $("#youtubeReimportReview");
   const entries = Array.isArray(preview.entries) ? preview.entries : [];
   const creatorCounts = entries.reduce((counts, entry) => {
-    const label = entry.creator || "動画URL";
+    const label = entry.creator || "提供元未判定";
     counts[label] = (counts[label] || 0) + 1;
     return counts;
   }, {});
-  const creatorSummary = ["ジョージ", "炊事場", "ファビオ", "おかずJAPAN", "動画URL"]
+  const creatorSummary = ["ジョージ", "炊事場", "ファビオ", "おかずJAPAN", "提供元未判定"]
     .filter((label) => creatorCounts[label])
     .map((label) => `${label} ${creatorCounts[label]}件`)
     .join("・");
   const summary = state.youtubeReimportSummary;
+  const mealieCount = Number(preview.mealie_count || 0);
+  const draftCount = Number(preview.draft_count || 0);
+  const sourceNotice = mealieCount === 0 && draftCount > 0
+    ? "<p>対象はすべてローカル下書きです。Mealie由来のYouTubeレシピは対象内にありません。接続状態は画面上部で確認できます。</p>"
+    : "";
   const bulkStatus = summary
     ? `<p class="${summary.failed || summary.missingSteps ? "unresolved" : ""}">全件処理：${summary.processed}/${summary.total}件・工程あり ${summary.withSteps}件・工程なし ${summary.missingSteps}件・材料変更なし ${summary.ingredientUnchanged}件・材料変更あり ${summary.ingredientChanged}件・比較要確認 ${summary.ingredientUnknown}件・失敗 ${summary.failed}件</p><p>工程なし・材料変更あり・比較要確認・取り込み警告ありの${summary.reviewRequired}件を優先して確認してください。警告のない材料変更なし${summary.reviewOptional}件は下にまとめています。</p>`
     : "";
@@ -678,7 +683,7 @@ function renderYoutubeReimportPreview(preview) {
         : entry.bulk_status
           ? "再取り込み結果を確認"
           : entry.draft_status === "review" ? "下書きを確認" : "再取り込み";
-    return `<li><strong>${escapeHtml(entry.creator || "動画URL")}</strong> — ${escapeHtml(entry.title)} <small>（${location}）</small>
+    return `<li><strong>${escapeHtml(entry.creator || "提供元未判定")}</strong> — ${escapeHtml(entry.title)} <small>（${location}）</small>
       ${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">動画を確認</a>` : ""}
       ${ingredientStatus ? `<div class="${comparison?.status === "changed" || comparison?.status === "unknown" ? "unresolved" : ""}">${escapeHtml(ingredientStatus)}</div>` : ""}
       ${stepStatus ? `<div class="${entry.step_count ? "" : "unresolved"}">${escapeHtml(stepStatus)}</div>` : ""}
@@ -687,7 +692,9 @@ function renderYoutubeReimportPreview(preview) {
     </li>`;
   };
   element.innerHTML = `<strong>再取り込み対象 ${entries.length}件</strong>
-    <p>Mealie ${Number(preview.mealie_count || 0)}件・ローカル下書き ${Number(preview.draft_count || 0)}件</p>
+    <p>YouTube動画URL確認済み ${Number(preview.youtube_url_count ?? entries.length)}件</p>
+    <p>対象内訳：Mealie由来 ${mealieCount}件・ローカル下書き ${draftCount}件</p>
+    ${sourceNotice}
     ${creatorSummary ? `<p>${escapeHtml(creatorSummary)}</p>` : ""}
     <p>精度向上版を取得して現在の材料と比較します。変更がある結果を確認・保存した後に、必要なものだけMealieへ同期してください。</p>
     <button class="primary-button" type="button" data-action="bulk-reimport-youtube" ${entries.length && !state.youtubeReimportRunning ? "" : "disabled"}>${state.youtubeReimportRunning && summary ? `${summary.processed}/${summary.total}件を再取り込み中…` : "全件再取り込み・材料比較"}</button>
