@@ -184,7 +184,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--amber); box-shad
 .form-grid [data-portion-field].hidden { display: none; }
 label small { color: var(--muted); font-weight: 400; }
 .dialog-actions { display: flex; justify-content: end; gap: 10px; margin-top: 22px; }
-.form-message { min-height: 20px; color: #b42318; }
+.form-message { min-height: 20px; color: #b42318; white-space: pre-line; }
 .cook-mode { position: fixed; inset: 0; z-index: 50; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; height: 100dvh; overflow: hidden; background: var(--navy); color: #fff; }
 .cook-mode header { display: grid; grid-template-columns: 150px 1fr 150px; align-items: center; gap: 15px; padding: 18px 28px; border-bottom: 1px solid rgba(255,255,255,.1); text-align: center; }
 .cook-mode header > div { min-width: 0; }

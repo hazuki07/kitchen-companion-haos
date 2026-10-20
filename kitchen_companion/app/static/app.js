@@ -358,7 +358,10 @@ async function loadRecipes(query = "") {
 async function loadRuntime() {
   state.runtime = await api("/api/runtime");
   const jevLabel = state.runtime.jev_review_enabled ? " · Jev検品" : "";
-  $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label + jevLabel)}`;
+  const generationLabel = state.runtime.openai_generation_enabled
+    ? ` · AI工程生成（${state.runtime.openai_model}）`
+    : "";
+  $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label + generationLabel + jevLabel)}`;
   renderCatalogStatus();
 }
 
@@ -648,7 +651,7 @@ function renderYoutubeReimportPreview(preview) {
     .join("・");
   const summary = state.youtubeReimportSummary;
   const bulkStatus = summary
-    ? `<p class="${summary.failed ? "unresolved" : ""}">全件処理：${summary.processed}/${summary.total}件・材料変更なし ${summary.ingredientUnchanged}件・材料変更あり ${summary.ingredientChanged}件・比較要確認 ${summary.ingredientUnknown}件・失敗 ${summary.failed}件</p><p>材料変更あり・比較要確認・取り込み警告ありの${summary.reviewRequired}件を優先して確認してください。警告のない材料変更なし${summary.reviewOptional}件は下にまとめています。</p>`
+    ? `<p class="${summary.failed || summary.missingSteps ? "unresolved" : ""}">全件処理：${summary.processed}/${summary.total}件・工程あり ${summary.withSteps}件・工程なし ${summary.missingSteps}件・材料変更なし ${summary.ingredientUnchanged}件・材料変更あり ${summary.ingredientChanged}件・比較要確認 ${summary.ingredientUnknown}件・失敗 ${summary.failed}件</p><p>工程なし・材料変更あり・比較要確認・取り込み警告ありの${summary.reviewRequired}件を優先して確認してください。警告のない材料変更なし${summary.reviewOptional}件は下にまとめています。</p>`
     : "";
   const resultEntries = summary
     ? entries.filter((entry) => entry.bulk_status !== "ingredient-unchanged")
@@ -665,6 +668,9 @@ function renderYoutubeReimportPreview(preview) {
       : comparison?.status === "changed"
         ? `材料変更あり（追加${comparison.added_count || 0}・削除${comparison.removed_count || 0}）`
         : entry.bulk_status ? "材料を比較できません" : "";
+    const stepStatus = Number.isInteger(entry.step_count)
+      ? entry.step_count > 0 ? `工程${entry.step_count}件` : "工程なし"
+      : "";
     const buttonLabel = entry.bulk_status === "failed"
       ? "再試行"
       : entry.bulk_status === "saved"
@@ -675,6 +681,7 @@ function renderYoutubeReimportPreview(preview) {
     return `<li><strong>${escapeHtml(entry.creator || "動画URL")}</strong> — ${escapeHtml(entry.title)} <small>（${location}）</small>
       ${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">動画を確認</a>` : ""}
       ${ingredientStatus ? `<div class="${comparison?.status === "changed" || comparison?.status === "unknown" ? "unresolved" : ""}">${escapeHtml(ingredientStatus)}</div>` : ""}
+      ${stepStatus ? `<div class="${entry.step_count ? "" : "unresolved"}">${escapeHtml(stepStatus)}</div>` : ""}
       ${entry.bulk_error ? `<div class="unresolved">${escapeHtml(entry.bulk_error)}</div>` : ""}
       <button class="secondary-button" type="button" data-reimport-id="${escapeHtml(entry.id)}">${buttonLabel}</button>
     </li>`;
@@ -759,6 +766,8 @@ async function bulkReimportYoutubeRecipes() {
     ingredientUnchanged: 0,
     ingredientChanged: 0,
     ingredientUnknown: 0,
+    withSteps: 0,
+    missingSteps: 0,
     failed: 0,
   };
   entries.forEach((entry) => {
@@ -778,6 +787,7 @@ async function bulkReimportYoutubeRecipes() {
         const ingredientComparison = draft.reimport_comparison?.ingredients || { status: "unknown" };
         entry.ingredient_comparison = ingredientComparison;
         const hasWarnings = Boolean(draft.import_warnings?.length);
+        entry.step_count = Array.isArray(draft.steps) ? draft.steps.length : 0;
         entry.bulk_status = ingredientComparison.status === "unchanged" && !hasWarnings
           ? "ingredient-unchanged"
           : "review-required";
@@ -788,6 +798,8 @@ async function bulkReimportYoutubeRecipes() {
         else state.youtubeReimportSummary.ingredientUnknown += 1;
         if (entry.bulk_status === "review-required") state.youtubeReimportSummary.reviewRequired += 1;
         else state.youtubeReimportSummary.reviewOptional += 1;
+        if (entry.step_count) state.youtubeReimportSummary.withSteps += 1;
+        else state.youtubeReimportSummary.missingSteps += 1;
       } catch (error) {
         entry.bulk_status = "failed";
         entry.bulk_error = error.message;
@@ -939,8 +951,19 @@ function openEditor(recipe = null, videoOnly = false) {
   const comparisonMessage = comparison
     ? `再取り込み差分：材料 ${comparison.previous_ingredient_count}→${comparison.new_ingredient_count}件、工程 ${comparison.previous_step_count}→${comparison.new_step_count}件、基準人数 ${comparison.previous_servings ?? "未確認"}→${comparison.new_servings ?? "未確認"}`
     : "";
+  const generationStatus = {
+    approved: "Jev承認",
+    review_required: "要手動確認",
+    source_incomplete: "出典工程が不十分",
+    review_unavailable: "Jev検品未完了",
+    unavailable: "生成未完了",
+  }[recipe?.generation_status] || "";
+  const generationMessage = generationStatus
+    ? `動画要約・工程生成：${generationStatus}（${recipe.generation_attempts?.length || 0}回）${recipe.generation_summary ? `\n要約：${recipe.generation_summary}` : ""}`
+    : "";
   $("#formMessage").textContent = [
     importWarnings.length ? `要確認：${importWarnings.join("／")}` : "",
+    generationMessage,
     ingredientComparisonMessage,
     comparisonMessage,
   ].filter(Boolean).join("\n");
