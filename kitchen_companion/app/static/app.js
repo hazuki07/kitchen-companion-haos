@@ -648,30 +648,45 @@ function renderYoutubeReimportPreview(preview) {
     .join("・");
   const summary = state.youtubeReimportSummary;
   const bulkStatus = summary
-    ? `<p class="${summary.failed ? "unresolved" : ""}">全件処理：${summary.processed}/${summary.total}件・確認待ち ${summary.ready}件・要確認あり ${summary.warning}件・失敗 ${summary.failed}件</p><p>確認待ち結果はこの画面を閉じる前に1件ずつ確認・保存してください。</p>`
+    ? `<p class="${summary.failed ? "unresolved" : ""}">全件処理：${summary.processed}/${summary.total}件・材料変更なし ${summary.ingredientUnchanged}件・材料変更あり ${summary.ingredientChanged}件・比較要確認 ${summary.ingredientUnknown}件・失敗 ${summary.failed}件</p><p>材料変更あり・比較要確認・取り込み警告ありの${summary.reviewRequired}件を優先して確認してください。警告のない材料変更なし${summary.reviewOptional}件は下にまとめています。</p>`
     : "";
-  element.innerHTML = `<strong>再取り込み対象 ${entries.length}件</strong>
-    <p>Mealie ${Number(preview.mealie_count || 0)}件・ローカル下書き ${Number(preview.draft_count || 0)}件</p>
-    ${creatorSummary ? `<p>${escapeHtml(creatorSummary)}</p>` : ""}
-    <p>各レシピを再取得するとローカル下書きが開きます。内容を確認・保存した後に、Mealieへ同期してください。</p>
-    <button class="primary-button" type="button" data-action="bulk-reimport-youtube" ${entries.length && !state.youtubeReimportRunning ? "" : "disabled"}>${state.youtubeReimportRunning && summary ? `${summary.processed}/${summary.total}件を再取り込み中…` : "全件再取り込み"}</button>
-    ${bulkStatus}
-    <ul>${entries.map((entry) => {
-      const source = safeUrl(entry.source_url);
-      const location = entry.source_kind === "draft" ? "ローカル下書き" : "Mealie";
-      const buttonLabel = entry.bulk_status === "ready"
-        ? "再取り込み結果を確認"
-        : entry.bulk_status === "failed"
-          ? "再試行"
-          : entry.bulk_status === "saved"
-            ? "保存済みを確認"
-            : entry.draft_status === "review" ? "下書きを確認" : "再取り込み";
-      return `<li><strong>${escapeHtml(entry.creator || "動画URL")}</strong> — ${escapeHtml(entry.title)} <small>（${location}）</small>
+  const resultEntries = summary
+    ? entries.filter((entry) => entry.bulk_status !== "ingredient-unchanged")
+    : entries;
+  const unchangedEntries = summary
+    ? entries.filter((entry) => entry.bulk_status === "ingredient-unchanged")
+    : [];
+  const renderEntry = (entry) => {
+    const source = safeUrl(entry.source_url);
+    const location = entry.source_kind === "draft" ? "ローカル下書き" : "Mealie";
+    const comparison = entry.ingredient_comparison;
+    const ingredientStatus = comparison?.status === "unchanged"
+      ? "材料変更なし"
+      : comparison?.status === "changed"
+        ? `材料変更あり（追加${comparison.added_count || 0}・削除${comparison.removed_count || 0}）`
+        : entry.bulk_status ? "材料を比較できません" : "";
+    const buttonLabel = entry.bulk_status === "failed"
+      ? "再試行"
+      : entry.bulk_status === "saved"
+        ? "保存済みを確認"
+        : entry.bulk_status
+          ? "再取り込み結果を確認"
+          : entry.draft_status === "review" ? "下書きを確認" : "再取り込み";
+    return `<li><strong>${escapeHtml(entry.creator || "動画URL")}</strong> — ${escapeHtml(entry.title)} <small>（${location}）</small>
       ${source ? `<a class="source-link" href="${escapeHtml(source)}" target="_blank" rel="noopener noreferrer">動画を確認</a>` : ""}
+      ${ingredientStatus ? `<div class="${comparison?.status === "changed" || comparison?.status === "unknown" ? "unresolved" : ""}">${escapeHtml(ingredientStatus)}</div>` : ""}
       ${entry.bulk_error ? `<div class="unresolved">${escapeHtml(entry.bulk_error)}</div>` : ""}
       <button class="secondary-button" type="button" data-reimport-id="${escapeHtml(entry.id)}">${buttonLabel}</button>
     </li>`;
-    }).join("")}</ul>`;
+  };
+  element.innerHTML = `<strong>再取り込み対象 ${entries.length}件</strong>
+    <p>Mealie ${Number(preview.mealie_count || 0)}件・ローカル下書き ${Number(preview.draft_count || 0)}件</p>
+    ${creatorSummary ? `<p>${escapeHtml(creatorSummary)}</p>` : ""}
+    <p>精度向上版を取得して現在の材料と比較します。変更がある結果を確認・保存した後に、必要なものだけMealieへ同期してください。</p>
+    <button class="primary-button" type="button" data-action="bulk-reimport-youtube" ${entries.length && !state.youtubeReimportRunning ? "" : "disabled"}>${state.youtubeReimportRunning && summary ? `${summary.processed}/${summary.total}件を再取り込み中…` : "全件再取り込み・材料比較"}</button>
+    ${bulkStatus}
+    <ul>${resultEntries.map(renderEntry).join("")}</ul>
+    ${unchangedEntries.length ? `<details><summary>材料変更なし・警告なし ${unchangedEntries.length}件</summary><ul>${unchangedEntries.map(renderEntry).join("")}</ul></details>` : ""}`;
   element.classList.remove("hidden");
 }
 
@@ -729,7 +744,7 @@ async function bulkReimportYoutubeRecipes() {
   const entries = state.youtubeReimport?.entries || [];
   if (!entries.length || state.youtubeReimportRunning) return;
   if (!window.confirm(
-    `対象${entries.length}件を20件ずつ再取り込みします。結果は確認待ちになり、Mealieへは同期しません。続けますか？`,
+    `対象${entries.length}件を20件ずつ再取り込みし、現在の材料と比較します。Mealieへは同期しません。続けますか？`,
   )) return;
 
   state.youtubeReimportRunning = true;
@@ -739,6 +754,11 @@ async function bulkReimportYoutubeRecipes() {
     processed: 0,
     ready: 0,
     warning: 0,
+    reviewRequired: 0,
+    reviewOptional: 0,
+    ingredientUnchanged: 0,
+    ingredientChanged: 0,
+    ingredientUnknown: 0,
     failed: 0,
   };
   entries.forEach((entry) => {
@@ -755,9 +775,19 @@ async function bulkReimportYoutubeRecipes() {
           method: "POST",
         });
         state.youtubeReimportDrafts.set(entry.id, draft);
-        entry.bulk_status = "ready";
+        const ingredientComparison = draft.reimport_comparison?.ingredients || { status: "unknown" };
+        entry.ingredient_comparison = ingredientComparison;
+        const hasWarnings = Boolean(draft.import_warnings?.length);
+        entry.bulk_status = ingredientComparison.status === "unchanged" && !hasWarnings
+          ? "ingredient-unchanged"
+          : "review-required";
         state.youtubeReimportSummary.ready += 1;
-        if (draft.import_warnings?.length) state.youtubeReimportSummary.warning += 1;
+        if (hasWarnings) state.youtubeReimportSummary.warning += 1;
+        if (ingredientComparison.status === "unchanged") state.youtubeReimportSummary.ingredientUnchanged += 1;
+        else if (ingredientComparison.status === "changed") state.youtubeReimportSummary.ingredientChanged += 1;
+        else state.youtubeReimportSummary.ingredientUnknown += 1;
+        if (entry.bulk_status === "review-required") state.youtubeReimportSummary.reviewRequired += 1;
+        else state.youtubeReimportSummary.reviewOptional += 1;
       } catch (error) {
         entry.bulk_status = "failed";
         entry.bulk_error = error.message;
@@ -773,7 +803,7 @@ async function bulkReimportYoutubeRecipes() {
   renderYoutubeReimportPreview(state.youtubeReimport);
   await loadRecipes();
   showToast(
-    `全件再取り込み完了：確認待ち${state.youtubeReimportSummary.ready}件・失敗${state.youtubeReimportSummary.failed}件`,
+    `全件再取り込み完了：優先確認${state.youtubeReimportSummary.reviewRequired}件・材料変更なし${state.youtubeReimportSummary.ingredientUnchanged}件・失敗${state.youtubeReimportSummary.failed}件`,
   );
 }
 
@@ -900,11 +930,18 @@ function openEditor(recipe = null, videoOnly = false) {
   $("#videoField").value = recipe?.video_url || "";
   const importWarnings = Array.isArray(recipe?.import_warnings) ? recipe.import_warnings : [];
   const comparison = recipe?.reimport_comparison;
+  const ingredientComparison = comparison?.ingredients;
+  const ingredientComparisonMessage = ingredientComparison?.status === "unchanged"
+    ? "材料比較：変更なし"
+    : ingredientComparison?.status === "changed"
+      ? `材料比較：変更あり\n追加：${ingredientComparison.added?.join("／") || "なし"}\n削除・変更前：${ingredientComparison.removed?.join("／") || "なし"}`
+      : comparison ? "材料比較：材料がないため比較要確認" : "";
   const comparisonMessage = comparison
     ? `再取り込み差分：材料 ${comparison.previous_ingredient_count}→${comparison.new_ingredient_count}件、工程 ${comparison.previous_step_count}→${comparison.new_step_count}件、基準人数 ${comparison.previous_servings ?? "未確認"}→${comparison.new_servings ?? "未確認"}`
     : "";
   $("#formMessage").textContent = [
     importWarnings.length ? `要確認：${importWarnings.join("／")}` : "",
+    ingredientComparisonMessage,
     comparisonMessage,
   ].filter(Boolean).join("\n");
   updatePortionFields();
