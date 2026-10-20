@@ -1557,6 +1557,148 @@ def youtube_player_metadata(html: str) -> dict[str, str]:
     }
 
 
+def youtube_caption_track_url(html: str) -> str:
+    response = extract_embedded_json(html, "ytInitialPlayerResponse") or {}
+    captions = response.get("captions")
+    captions = captions if isinstance(captions, dict) else {}
+    renderer = captions.get("playerCaptionsTracklistRenderer")
+    renderer = renderer if isinstance(renderer, dict) else {}
+    tracks = renderer.get("captionTracks")
+    tracks = tracks if isinstance(tracks, list) else []
+
+    candidates: list[tuple[tuple[int, int], str]] = []
+    for track in tracks:
+        if not isinstance(track, dict):
+            continue
+        raw_url = str(track.get("baseUrl") or "").strip()
+        if not raw_url:
+            continue
+        try:
+            safe_url = safe_http_url(raw_url)
+        except ValueError:
+            continue
+        hostname = (urlparse(safe_url).hostname or "").casefold()
+        if hostname != "youtube.com" and not hostname.endswith(".youtube.com"):
+            continue
+        language = str(track.get("languageCode") or "").casefold()
+        generated = str(track.get("kind") or "").casefold() == "asr"
+        candidates.append(((0 if language.startswith("ja") else 1, 1 if generated else 0), safe_url))
+    if not candidates:
+        return ""
+    return min(candidates, key=lambda item: item[0])[1]
+
+
+def fetch_youtube_caption_segments(url: str) -> list[tuple[int, str]]:
+    url = safe_http_url(url)
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").casefold()
+    if hostname != "youtube.com" and not hostname.endswith(".youtube.com"):
+        raise ValueError("YouTube字幕URLではありません")
+    json_url = re.sub(r"([?&])fmt=[^&]*", r"\1fmt=json3", url, count=1)
+    if json_url == url:
+        json_url = f"{url}{'&' if parsed.query else '?'}fmt=json3"
+    assert_public_host(json_url)
+    request = Request(
+        json_url,
+        headers={"User-Agent": "KitchenCompanion/0.1 (+personal recipe importer)"},
+    )
+    try:
+        with build_opener(SafeRedirectHandler()).open(request, timeout=12) as response:
+            final_url = response.geturl()
+            final_hostname = (urlparse(final_url).hostname or "").casefold()
+            if final_hostname != "youtube.com" and not final_hostname.endswith(".youtube.com"):
+                raise ValueError("YouTube以外へ転送された字幕は取得できません")
+            assert_public_host(final_url)
+            raw = response.read(MAX_IMPORT + 1)
+            if len(raw) > MAX_IMPORT:
+                raise ValueError("字幕データが大きすぎて取り込めません")
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise ValueError("公開字幕を取得できませんでした") from exc
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("公開字幕の形式を読み取れませんでした") from exc
+
+    events = payload.get("events") if isinstance(payload, dict) else []
+    events = events if isinstance(events, list) else []
+    result: list[tuple[int, str]] = []
+    for event in events[:10_000]:
+        if not isinstance(event, dict):
+            continue
+        segments = event.get("segs")
+        if not isinstance(segments, list):
+            continue
+        text = "".join(
+            str(segment.get("utf8") or "")
+            for segment in segments
+            if isinstance(segment, dict)
+        )
+        text = " ".join(text.replace("\n", " ").split()).strip()
+        if not text or re.fullmatch(r"[\[【(（].{0,30}[\]】)）]", text):
+            continue
+        try:
+            start_seconds = max(0, int(float(event.get("tStartMs") or 0) / 1000))
+        except (TypeError, ValueError):
+            start_seconds = 0
+        result.append((start_seconds, text[:500]))
+    return result
+
+
+def caption_recipe_steps(segments: list[tuple[int, str]]) -> tuple[list[str], list[int | None]]:
+    action = re.compile(
+        r"(?:切|刻|剥|むく|むき|むい|洗|さら|水気|湯切|入れ|投入|加え|混ぜ|"
+        r"合わせ|和え|絡め|炒め|焼|煮|煮詰め|茹|ゆで|揚げ|蒸|炊|漬け|下味|"
+        r"揉|こね|延ば|のば|巻|包|挟|ほぐ|潰|つぶ|おろ|濾|こし|まぶ|振り|"
+        r"溶か|溶き|絞|取り出|取り除|移し|返し|裏返|蓋を|ふたを|乳化|"
+        r"火にかけ|火を止め|温め|冷ま|冷や|沸か|沸騰|加熱|レンジ|電子レンジ|"
+        r"味付け|味を整|調味|塩を|胡椒|こしょう|盛|仕上げ|かけ|注|添え|"
+        r"休ませ|寝かせ|置い|待ち)"
+    )
+    sentences: list[tuple[int, str]] = []
+    buffer = ""
+    buffer_start = 0
+    for start, text in segments:
+        if buffer and start - buffer_start >= 15:
+            sentences.append((buffer_start, buffer.strip()))
+            buffer = ""
+        if not buffer:
+            buffer_start = start
+        buffer += text
+        parts = re.split(r"(?<=[。！？!?])", buffer)
+        buffer = parts.pop() if parts else ""
+        for part in parts:
+            clean = part.strip()
+            if clean:
+                sentences.append((buffer_start, clean))
+            buffer_start = start
+        if len(buffer) >= 120:
+            sentences.append((buffer_start, buffer.strip()))
+            buffer = ""
+    if buffer.strip():
+        sentences.append((buffer_start, buffer.strip()))
+
+    steps: list[str] = []
+    timestamps: list[int | None] = []
+    seen: set[str] = set()
+    for start, sentence in sentences:
+        clean = re.sub(r"\s+", " ", sentence).strip(" ・")
+        if not clean or not action.search(clean):
+            continue
+        identity = unicodedata.normalize("NFKC", clean).casefold()
+        if identity in seen:
+            continue
+        seen.add(identity)
+        steps.append(clean[:2000])
+        timestamps.append(start)
+        if len(steps) >= 100:
+            break
+    return steps, timestamps
+
+
+def caption_source_text(segments: list[tuple[int, str]]) -> str:
+    return "\n".join(f"[{seconds}s] {text}" for seconds, text in segments)[:30_000]
+
+
 def recipe_draft_from_node(node: dict[str, Any], source_url: str, video_url: str = "") -> dict[str, Any]:
     image = node.get("image", "")
     if isinstance(image, list):
@@ -1630,7 +1772,11 @@ def with_jev_import_review(
     return result
 
 
-def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
+def video_draft_from_html(
+    url: str, html: str, caption_segments: list[tuple[int, str]] | None = None
+) -> dict[str, Any]:
+    caption_segments = caption_segments or []
+    caption_steps, caption_timestamps = caption_recipe_steps(caption_segments)
     structured = parse_json_ld_nodes(html)
     recipe_node = next((node for value in structured if (node := find_recipe_node(value))), None)
     youtube = youtube_player_metadata(html)
@@ -1644,6 +1790,11 @@ def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
             clean_steps, timestamps = steps_with_video_timestamps(steps)
             draft["steps"] = clean_steps
             draft["step_video_timestamps"] = timestamps
+        used_captions = False
+        if not draft["steps"] and caption_steps:
+            draft["steps"] = caption_steps
+            draft["step_video_timestamps"] = caption_timestamps
+            used_captions = True
         if full_description and len(full_description) > len(draft["description"]):
             draft["description"] = full_description[:2000]
         if not draft["servings_confirmed"] and re.search(
@@ -1651,7 +1802,13 @@ def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
         ):
             draft["servings"] = servings
             draft["servings_confirmed"] = True
-        return with_video_import_warnings(draft)
+        result = with_video_import_warnings(draft)
+        if used_captions:
+            result["import_warnings"] = [
+                *result["import_warnings"],
+                "工程は公開字幕の調理発話から抽出しました。保存前に順序と抜けを確認してください",
+            ]
+        return result
 
     video_node = next(
         (node for value in structured if (node := find_typed_node(value, "VideoObject"))),
@@ -1680,6 +1837,11 @@ def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
         re.search(r"\d+(?:\.\d+)?\s*(?:人分|servings?)", description, re.IGNORECASE)
     )
     steps, step_video_timestamps = steps_with_video_timestamps(steps)
+    used_captions = False
+    if not steps and caption_steps:
+        steps = caption_steps
+        step_video_timestamps = caption_timestamps
+        used_captions = True
     try:
         image_url = safe_image_url(urljoin(url, str(image or "")))
     except ValueError:
@@ -1699,7 +1861,13 @@ def video_draft_from_html(url: str, html: str) -> dict[str, Any]:
             "tags": ["動画"],
         }
     )
-    return with_video_import_warnings(draft)
+    result = with_video_import_warnings(draft)
+    if used_captions:
+        result["import_warnings"] = [
+            *result["import_warnings"],
+            "工程は公開字幕の調理発話から抽出しました。保存前に順序と抜けを確認してください",
+        ]
+    return result
 
 
 def import_recipe(url: str) -> dict[str, Any]:
@@ -1716,10 +1884,21 @@ def import_recipe(url: str) -> dict[str, Any]:
 
 def import_video(url: str, reviewer: RecipeImportReviewer | None = None) -> dict[str, Any]:
     url, html = fetch_public_html(url, "動画")
-    draft = video_draft_from_html(url, html)
+    caption_segments: list[tuple[int, str]] = []
+    caption_url = youtube_caption_track_url(html)
+    if caption_url:
+        try:
+            caption_segments = fetch_youtube_caption_segments(caption_url)
+        except ValueError:
+            caption_segments = []
+    draft = video_draft_from_html(url, html, caption_segments)
     if reviewer is None:
         return draft
-    source_text = youtube_player_metadata(html)["description"] or draft["description"]
+    description = youtube_player_metadata(html)["description"] or draft["description"]
+    transcript = caption_source_text(caption_segments)
+    source_text = "\n\n".join(
+        part for part in (description, f"公開字幕:\n{transcript}" if transcript else "") if part
+    )[:30_000]
     return with_jev_import_review(draft, source_text, reviewer)
 
 

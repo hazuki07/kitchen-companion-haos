@@ -34,11 +34,13 @@ from app.server import (  # noqa: E402
     RecipeStore,
     assert_public_host,
     build_recipe_list_items,
+    caption_recipe_steps,
     compare_recipe_ingredients,
     create_normalized_draft,
     create_youtube_reimport_draft,
     extract_description_recipe,
     extract_video_url,
+    fetch_youtube_caption_segments,
     find_recipe_node,
     flatten_steps,
     ingredient_amounts_match,
@@ -49,6 +51,7 @@ from app.server import (  # noqa: E402
     save_review_bundle,
     validate_recipe,
     video_draft_from_html,
+    youtube_caption_track_url,
     youtube_reimport_candidates,
 )
 
@@ -760,6 +763,122 @@ class RecipeTests(unittest.TestCase):
         )
         self.assertEqual(draft["steps"], ["豆を洗う。", "架空の鍋で煮る。"])
         self.assertEqual(draft["step_video_timestamps"], [15, 90])
+
+    def test_youtube_caption_track_prefers_manual_japanese(self) -> None:
+        player_response = {
+            "captions": {
+                "playerCaptionsTracklistRenderer": {
+                    "captionTracks": [
+                        {
+                            "baseUrl": "https://www.youtube.com/api/timedtext?v=fake&lang=en",
+                            "languageCode": "en",
+                        },
+                        {
+                            "baseUrl": "https://www.youtube.com/api/timedtext?v=fake&lang=ja&kind=asr",
+                            "languageCode": "ja",
+                            "kind": "asr",
+                        },
+                        {
+                            "baseUrl": "https://www.youtube.com/api/timedtext?v=fake&lang=ja",
+                            "languageCode": "ja",
+                        },
+                    ]
+                }
+            }
+        }
+        html = f"<script>var ytInitialPlayerResponse = {json.dumps(player_response)};</script>"
+
+        track_url = youtube_caption_track_url(html)
+
+        self.assertEqual(
+            track_url,
+            "https://www.youtube.com/api/timedtext?v=fake&lang=ja",
+        )
+
+    def test_caption_recipe_steps_keeps_cooking_actions_and_timestamps(self) -> None:
+        steps, timestamps = caption_recipe_steps(
+            [
+                (3, "今日は架空の料理を作ります。"),
+                (12, "玉ねぎを薄く切ります。"),
+                (28, "フライパンに油を入れて炒めます。"),
+                (44, "チャンネル登録もお願いします。"),
+            ]
+        )
+
+        self.assertEqual(
+            steps,
+            ["玉ねぎを薄く切ります。", "フライパンに油を入れて炒めます。"],
+        )
+        self.assertEqual(timestamps, [12, 28])
+
+    def test_caption_recipe_steps_splits_unpunctuated_speech_by_time(self) -> None:
+        steps, timestamps = caption_recipe_steps(
+            [
+                (10, "玉ねぎを切っていきます"),
+                (18, "次にフライパンを温めます"),
+                (27, "油を入れて玉ねぎを炒めます"),
+            ]
+        )
+
+        self.assertEqual(
+            steps,
+            ["玉ねぎを切っていきます次にフライパンを温めます", "油を入れて玉ねぎを炒めます"],
+        )
+        self.assertEqual(timestamps, [10, 27])
+
+    def test_fetch_youtube_caption_segments_reads_json3_without_network(self) -> None:
+        payload = {
+            "events": [
+                {"tStartMs": 12500, "segs": [{"utf8": "玉ねぎを"}, {"utf8": "切ります。"}]},
+                {"tStartMs": 16000, "segs": [{"utf8": "[音楽]"}]},
+            ]
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def geturl(self) -> str:
+                return "https://www.youtube.com/api/timedtext?v=fake&fmt=json3"
+
+            def read(self, _size: int) -> bytes:
+                return json.dumps(payload).encode()
+
+        class Opener:
+            def open(self, request, timeout):
+                self.request = request
+                self.timeout = timeout
+                return Response()
+
+        opener = Opener()
+        with (
+            patch("app.server.assert_public_host"),
+            patch("app.server.build_opener", return_value=opener),
+        ):
+            segments = fetch_youtube_caption_segments(
+                "https://www.youtube.com/api/timedtext?v=fake&lang=ja"
+            )
+
+        self.assertEqual(segments, [(12, "玉ねぎを切ります。")])
+        self.assertIn("fmt=json3", opener.request.full_url)
+        self.assertEqual(opener.timeout, 12)
+
+    def test_video_uses_public_caption_actions_when_description_has_no_steps(self) -> None:
+        draft = video_draft_from_html(
+            "https://www.youtube.com/watch?v=AbCdEfGhI12",
+            '<meta property="og:title" content="字幕付き架空料理">',
+            [
+                (15, "架空食材を切ります。"),
+                (35, "鍋に入れて煮ます。"),
+            ],
+        )
+
+        self.assertEqual(draft["steps"], ["架空食材を切ります。", "鍋に入れて煮ます。"])
+        self.assertEqual(draft["step_video_timestamps"], [15, 35])
+        self.assertIn("公開字幕の調理発話", draft["import_warnings"][-1])
 
     def test_video_prefers_full_youtube_description_and_extended_headings(self) -> None:
         description = """短くない完全な概要欄
