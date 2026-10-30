@@ -712,7 +712,16 @@ def canonical_recipe_source(recipe: dict[str, Any]) -> str:
                 continue
             port = f":{port_number}" if port_number else ""
             path = parsed.path.rstrip("/") or "/"
-            return f"url:{parsed.scheme.casefold()}://{hostname}{port}{path}"
+            identity = f"url:{parsed.scheme.casefold()}://{hostname}{port}{path}"
+            fragment_params = parse_qs(parsed.fragment, keep_blank_values=False)
+            recipe_keys = fragment_params.get("recipe", [])
+            if recipe_keys:
+                recipe_key = re.sub(
+                    r"[^a-z0-9_-]+", "-", recipe_keys[0].casefold()
+                ).strip("-")
+                if recipe_key:
+                    identity += f"#recipe={recipe_key[:120]}"
+            return identity
     return ""
 
 
