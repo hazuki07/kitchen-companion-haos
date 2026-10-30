@@ -358,8 +358,8 @@ async function loadRecipes(query = "") {
 async function loadRuntime() {
   state.runtime = await api("/api/runtime");
   const jevLabel = state.runtime.jev_review_enabled ? " · Jev検品" : "";
-  const generationLabel = state.runtime.openai_generation_enabled
-    ? ` · AI工程生成（${state.runtime.openai_model}）`
+  const generationLabel = state.runtime.gemini_video_analysis_enabled
+    ? ` · Gemini動画解析（${state.runtime.gemini_model}）`
     : "";
   $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label + generationLabel + jevLabel)}`;
   renderCatalogStatus();
@@ -517,7 +517,9 @@ function renderDetail() {
   if (!guidance.length) state.quantityMode = "recipe";
   const showingGuidance = state.quantityMode === "guidance";
   const syncButton = !recipe.read_only && state.runtime?.mealie_sync_enabled
-    ? recipe.servings_confirmed === false
+    ? recipe.video_url && !recipe.steps?.length
+      ? '<button class="secondary-button" disabled>工程の確認後にMealie同期</button>'
+      : recipe.servings_confirmed === false
       ? '<button class="secondary-button" disabled>基準人数の確認後にMealie同期</button>'
       : recipe.mealie_sync_status === "synced"
       ? '<button class="secondary-button" disabled>Mealie同期済み</button>'
@@ -968,9 +970,23 @@ function openEditor(recipe = null, videoOnly = false) {
   const generationMessage = generationStatus
     ? `動画要約・工程生成：${generationStatus}（${recipe.generation_attempts?.length || 0}回）${recipe.generation_summary ? `\n要約：${recipe.generation_summary}` : ""}`
     : "";
+  const ingredientEvidenceMessage = Array.isArray(recipe?.ingredient_evidence)
+    ? `材料候補の根拠：\n${recipe.ingredient_evidence.slice(0, 30).map((item) => {
+      const source = item.source === "video" ? "動画" : item.source === "description" ? "概要欄" : "未確認";
+      const timestamp = Number.isInteger(item.start_seconds)
+        ? ` ${formatVideoTimestamp(item.start_seconds)}`
+        : "";
+      return `${item.ingredient} ← ${item.evidence || "根拠なし"}（${source}${timestamp}）`;
+    }).join("\n")}`
+    : "";
+  const missingVideoStepsMessage = recipe?.video_url && !recipe?.steps?.length
+    ? "工程を取得できていません。取り込みは動画映像・音声を直接解析せず、概要欄と公開字幕を使います。工程を1件以上入力するまで保存できません。"
+    : "";
   $("#formMessage").textContent = [
     importWarnings.length ? `要確認：${importWarnings.join("／")}` : "",
     generationMessage,
+    ingredientEvidenceMessage,
+    missingVideoStepsMessage,
     ingredientComparisonMessage,
     comparisonMessage,
   ].filter(Boolean).join("\n");
@@ -1002,6 +1018,10 @@ async function saveRecipe(event) {
     video_url: $("#videoField").value,
     image_url: state.editorImage,
   };
+  if (payload.video_url.trim() && !payload.steps.length) {
+    $("#formMessage").textContent = "動画URL付きレシピは工程を1件以上入力してから保存してください";
+    return;
+  }
   try {
     const recipe = await api(id ? `/api/recipes/${id}` : "/api/recipes", { method: id ? "PUT" : "POST", body: JSON.stringify(payload) });
     for (const [candidateId, draft] of state.youtubeReimportDrafts.entries()) {

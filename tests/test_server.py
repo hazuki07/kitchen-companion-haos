@@ -22,6 +22,7 @@ from app.clients import (  # noqa: E402
     MealieReadClient,
     MealieSyncClient,
 )
+from app.generation import GeminiVideoAnalyzer  # noqa: E402
 from app.integrations import (  # noqa: E402
     RuntimeConfig,
     StageCookingController,
@@ -44,12 +45,16 @@ from app.server import (  # noqa: E402
     find_recipe_node,
     flatten_steps,
     ingredient_amounts_match,
+    import_video,
+    make_server,
     parse_ingredient,
     parse_video_timestamp,
     prepare_local_youtube_reimport,
     preview_review_bundle,
     save_review_bundle,
     validate_recipe,
+    require_video_recipe_steps,
+    validate_video_recipe_save,
     video_draft_from_html,
     with_generated_step_review,
     youtube_caption_track_url,
@@ -953,6 +958,134 @@ class RecipeTests(unittest.TestCase):
         ])
         self.assertFalse(any("作り方がありません" in item for item in result["import_warnings"]))
 
+    def test_video_analysis_replaces_ingredients_with_reviewed_candidates(self) -> None:
+        class Generator:
+            manual_review_required = True
+
+            def generate(self, source_text, recipe, feedback=None):
+                return {
+                    "summary": "架空材料を煮る料理。",
+                    "ingredients": [
+                        {
+                            "text": "架空材料 200g",
+                            "evidence": "架空材料を200g用意",
+                            "source": "video",
+                            "start_seconds": 10,
+                            "unresolved": False,
+                        }
+                    ],
+                    "steps": [
+                        {
+                            "text": "架空材料を煮る。",
+                            "start_seconds": 20,
+                            "evidence": "架空材料を煮ます",
+                            "unresolved": False,
+                        }
+                    ],
+                    "unresolved": [],
+                }
+
+        class Reviewer:
+            threshold = 0.75
+
+            def review(self, source_text, recipe):
+                self.reviewed_ingredients = recipe["ingredients"]
+                return {
+                    "status": "reviewed",
+                    "decision": "recipe",
+                    "recipe_probability": 0.98,
+                    "source_ingredients_complete": 0.95,
+                    "ingredients_grounded": 0.95,
+                    "source_steps_complete": 0.96,
+                    "steps_grounded": 0.97,
+                    "needs_human_review": 0.02,
+                    "approved": True,
+                }
+
+        reviewer = Reviewer()
+        result = with_generated_step_review(
+            {
+                "title": "架空料理",
+                "ingredients": [{"name": "古い架空材料", "amount": 100, "unit": "g"}],
+                "steps": [],
+                "import_warnings": [],
+            },
+            "動画の架空出典",
+            Generator(),
+            reviewer,
+        )
+
+        self.assertEqual(reviewer.reviewed_ingredients[0]["name"], "架空材料")
+        self.assertEqual(reviewer.reviewed_ingredients[0]["amount"], 200)
+        self.assertEqual(result["generation_status"], "review_required")
+        self.assertTrue(any("手動で照合" in item for item in result["import_warnings"]))
+
+    def test_video_analysis_runs_without_jev_reviewer(self) -> None:
+        class Generator:
+            manual_review_required = True
+
+            def generate(self, source_text, recipe, feedback=None):
+                return {
+                    "summary": "架空料理の要約。",
+                    "ingredients": [],
+                    "steps": [
+                        {
+                            "text": "架空食材を煮る。",
+                            "start_seconds": 15,
+                            "evidence": "架空食材を煮ます",
+                            "unresolved": False,
+                        }
+                    ],
+                    "unresolved": [],
+                }
+
+        video_url = "https://www.youtube.com/watch?v=AbCdEfGhI12"
+        with patch(
+            "app.server.fetch_public_html",
+            return_value=(video_url, '<meta property="og:title" content="架空料理動画">'),
+        ):
+            result = import_video(video_url, generator=Generator())
+
+        self.assertEqual(result["steps"], ["架空食材を煮る。"])
+        self.assertEqual(result["generation_status"], "review_required")
+        self.assertNotIn("jev_review", result)
+
+    def test_video_analysis_keeps_existing_ingredients_when_model_returns_none(self) -> None:
+        class Generator:
+            manual_review_required = True
+
+            def generate(self, source_text, recipe, feedback=None):
+                return {
+                    "summary": "架空料理の要約。",
+                    "ingredients": [],
+                    "steps": [
+                        {
+                            "text": "豆を煮る。",
+                            "start_seconds": 15,
+                            "evidence": "豆を煮ます",
+                            "unresolved": False,
+                        }
+                    ],
+                    "unresolved": [],
+                }
+
+        result = with_generated_step_review(
+            {
+                "title": "架空料理",
+                "ingredients": [
+                    {"name": "架空豆", "amount": 100, "unit": "g", "original_text": "架空豆 100g"}
+                ],
+                "steps": [],
+                "import_warnings": [],
+            },
+            "架空豆 100g",
+            Generator(),
+            None,
+        )
+
+        self.assertEqual(result["ingredients"][0]["name"], "架空豆")
+        self.assertEqual(result["ingredients"][0]["amount"], 100)
+
     def test_generated_steps_retry_only_grounding_failure(self) -> None:
         class Generator:
             def __init__(self):
@@ -1203,6 +1336,53 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(draft["steps"], ["架空の鍋で煮る。"])
         self.assertEqual(draft["tags"], ["動画"])
 
+    def test_video_description_completes_partial_json_ld_ingredients(self) -> None:
+        description = """材料（2人分）
+豆 200g
+塩 少々
+"""
+        recipe = {
+            "@type": "Recipe",
+            "name": "架空の豆料理",
+            "recipeIngredient": ["豆 100g"],
+            "recipeInstructions": [{"text": "豆を煮る。"}],
+        }
+        html = (
+            f'<meta property="og:description" content="{description}">'
+            f'<script type="application/ld+json">{json.dumps(recipe)}</script>'
+        )
+
+        draft = video_draft_from_html("https://www.youtube.com/watch?v=AbCdEfGhI12", html)
+
+        self.assertEqual(
+            [(item["name"], item["amount"], item["note"]) for item in draft["ingredients"]],
+            [("豆", 200, ""), ("塩", None, "少々")],
+        )
+
+    def test_video_recipe_cannot_be_saved_without_steps(self) -> None:
+        with self.assertRaisesRegex(ValueError, "工程を1件以上"):
+            validate_video_recipe_save(
+                {
+                    "title": "架空の動画料理",
+                    "video_url": "https://www.youtube.com/watch?v=AbCdEfGhI12",
+                    "ingredients": ["豆 100g"],
+                    "steps": [],
+                }
+            )
+
+        recipe = validate_video_recipe_save(
+            {
+                "title": "架空の動画料理",
+                "video_url": "https://www.youtube.com/watch?v=AbCdEfGhI12",
+                "ingredients": ["豆 100g"],
+                "steps": ["豆を煮る。"],
+            }
+        )
+        self.assertEqual(recipe["steps"], ["豆を煮る。"])
+
+        with self.assertRaisesRegex(ValueError, "工程を1件以上"):
+            require_video_recipe_steps({"video_url": "https://video.example.invalid/watch/1", "steps": []})
+
     def test_stage_runtime_never_claims_real_integrations(self) -> None:
         status = RuntimeConfig(mode="stage").public_status()
         self.assertEqual(status["home_assistant"], "mock")
@@ -1222,21 +1402,42 @@ class RecipeTests(unittest.TestCase):
             runtime = RuntimeConfig.from_environment()
         self.assertTrue(runtime.public_status()["jev_review_enabled"])
 
-    def test_runtime_reports_optional_openai_generation(self) -> None:
+    def test_runtime_reports_optional_gemini_video_analysis(self) -> None:
         with patch.dict(
             "os.environ",
             {
                 "COOKING_ASSISTANT_MODE": "stage",
                 "COOKING_ASSISTANT_JEV_ENABLED": "true",
-                "COOKING_ASSISTANT_OPENAI_GENERATION_ENABLED": "true",
-                "COOKING_ASSISTANT_OPENAI_MODEL": "gpt-6-luna",
+                "COOKING_ASSISTANT_GEMINI_VIDEO_ANALYSIS_ENABLED": "true",
+                "COOKING_ASSISTANT_GEMINI_MODEL": "gemini-3.8-flash",
             },
             clear=True,
         ):
             runtime = RuntimeConfig.from_environment()
         status = runtime.public_status()
-        self.assertTrue(status["openai_generation_enabled"])
-        self.assertEqual(status["openai_model"], "gpt-6-luna")
+        self.assertTrue(status["gemini_video_analysis_enabled"])
+        self.assertEqual(status["gemini_model"], "gemini-3.8-flash")
+
+    def test_stage_server_initializes_gemini_without_jev(self) -> None:
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "COOKING_ASSISTANT_MODE": "stage",
+                    "COOKING_ASSISTANT_GEMINI_VIDEO_ANALYSIS_ENABLED": "true",
+                    "GEMINI_API_KEY": "fictional-gemini-secret",
+                },
+                clear=True,
+            ),
+            patch("app.server.RecipeStore", return_value=object()),
+        ):
+            server = make_server("127.0.0.1", 0, Path("unused.sqlite3"))
+        try:
+            handler = server.RequestHandlerClass
+            self.assertIsNone(handler.jev_reviewer)
+            self.assertIsInstance(handler.step_generator, GeminiVideoAnalyzer)
+        finally:
+            server.server_close()
 
     def test_prototype_runtime_enables_only_home_assistant_timer(self) -> None:
         with patch.dict(

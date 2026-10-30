@@ -35,7 +35,7 @@ from .clients import (
     MealieSyncClient,
     UrllibJsonTransport,
 )
-from .generation import OpenAIRecipeStepGenerator, RecipeStepGenerator
+from .generation import GeminiVideoAnalyzer, RecipeStepGenerator
 from .integrations import (
     RuntimeConfig,
     StageCookingController,
@@ -692,6 +692,17 @@ def safe_image_url(value: Any) -> str:
     if value.startswith("/assets/") or value.startswith("assets/"):
         return value.lstrip("/")
     return safe_http_url(value)
+
+
+def require_video_recipe_steps(recipe: dict[str, Any]) -> None:
+    if recipe.get("video_url") and not recipe.get("steps"):
+        raise ValueError("動画URL付きレシピは工程を1件以上入力してから保存してください")
+
+
+def validate_video_recipe_save(raw: dict[str, Any]) -> dict[str, Any]:
+    recipe = validate_recipe(raw)
+    require_video_recipe_steps(recipe)
+    return recipe
 
 
 def create_normalized_draft(
@@ -1806,7 +1817,7 @@ def with_generated_step_review(
     recipe: dict[str, Any],
     source_text: str,
     generator: RecipeStepGenerator,
-    reviewer: RecipeImportReviewer,
+    reviewer: RecipeImportReviewer | None,
     max_attempts: int = 3,
 ) -> dict[str, Any]:
     if not 1 <= max_attempts <= 3:
@@ -1819,7 +1830,7 @@ def with_generated_step_review(
             generated = generator.generate(source_text, latest, feedback)
         except IntegrationError:
             warnings = list(latest.get("import_warnings") or [])
-            warnings.append("OpenAIによる動画要約・工程生成を完了できませんでした")
+            warnings.append("Geminiによる動画要約・工程生成を完了できませんでした")
             return {
                 **latest,
                 "import_warnings": list(dict.fromkeys(warnings)),
@@ -1829,10 +1840,38 @@ def with_generated_step_review(
 
         steps = [str(item.get("text") or "").strip() for item in generated["steps"]]
         timestamps = [item.get("start_seconds") for item in generated["steps"]]
+        ingredient_evidence: list[dict[str, Any]] = []
+        generated_ingredients = generated.get("ingredients")
+        candidate_ingredients = latest.get("ingredients", [])
+        if isinstance(generated_ingredients, list):
+            candidate_ingredients = []
+            for item in generated_ingredients[:200]:
+                if not isinstance(item, dict):
+                    continue
+                source_text_value = str(item.get("text") or "").strip()[:500]
+                parsed_ingredient = parse_ingredient(source_text_value)
+                if not parsed_ingredient["name"]:
+                    continue
+                parsed_ingredient["original_text"] = source_text_value
+                candidate_ingredients.append(parsed_ingredient)
+                ingredient_evidence.append(
+                    {
+                        "ingredient": source_text_value,
+                        "evidence": str(item.get("evidence") or "")[:500],
+                        "source": str(item.get("source") or "unknown"),
+                        "start_seconds": item.get("start_seconds"),
+                        "unresolved": bool(item.get("unresolved")),
+                    }
+                )
+            if not candidate_ingredients:
+                candidate_ingredients = latest.get("ingredients", [])
         base_warnings = [
             warning
             for warning in latest.get("import_warnings", [])
-            if "構造化データに作り方がありません" not in warning
+            if (not candidate_ingredients or "材料を確認できませんでした" not in warning)
+            and "材料が出典に記載" not in warning
+            and "取り込んだ材料と出典" not in warning
+            and "構造化データに作り方がありません" not in warning
             and "工程は公開字幕の調理発話から抽出" not in warning
             and "Jevでは料理完成までの工程" not in warning
             and "Jevでは取り込んだ工程" not in warning
@@ -1840,10 +1879,39 @@ def with_generated_step_review(
         ]
         candidate = {
             **latest,
+            "ingredients": candidate_ingredients,
             "steps": steps,
             "step_video_timestamps": timestamps,
             "import_warnings": base_warnings,
         }
+        unresolved = list(generated.get("unresolved") or [])
+        unresolved_ingredients = any(item["unresolved"] for item in ingredient_evidence)
+        unresolved_steps = any(item.get("unresolved") for item in generated["steps"])
+        if reviewer is None:
+            attempts.append(
+                {"attempt": attempt, "status": "review_required", "step_count": len(steps)}
+            )
+            warnings = [
+                *base_warnings,
+                "Geminiの動画解析候補です。保存前に動画と根拠を手動で照合してください",
+            ]
+            if unresolved_ingredients:
+                warnings.append(
+                    "材料の未確認項目: "
+                    + "／".join(
+                        item["ingredient"] for item in ingredient_evidence if item["unresolved"]
+                    )
+                )
+            if unresolved:
+                warnings.append(f"動画解析の未確認項目: {'／'.join(unresolved)}")
+            return {
+                **candidate,
+                "generation_summary": generated["summary"],
+                "ingredient_evidence": ingredient_evidence,
+                "generation_status": "review_required",
+                "generation_attempts": attempts,
+                "import_warnings": list(dict.fromkeys(warnings)),
+            }
         reviewed = with_jev_import_review(candidate, source_text, reviewer)
         review = reviewed.get("jev_review") or {}
         threshold = float(getattr(reviewer, "threshold", 0.75))
@@ -1853,21 +1921,25 @@ def with_generated_step_review(
         )
         source_complete = (review.get("source_steps_complete") or 0) >= threshold
         grounded = (review.get("steps_grounded") or 0) >= threshold
+        ingredients_complete = (review.get("source_ingredients_complete") or 0) >= threshold
+        ingredients_grounded = (review.get("ingredients_grounded") or 0) >= threshold
         low_human_review = (
             review.get("needs_human_review") is not None
             and review["needs_human_review"] < 1 - threshold
         )
-        unresolved = list(generated.get("unresolved") or [])
-        unresolved_steps = any(item.get("unresolved") for item in generated["steps"])
         if review.get("status") == "unavailable":
             attempt_status = "review_unavailable"
         elif (
             is_recipe
             and steps
+            and ingredients_complete
+            and ingredients_grounded
             and source_complete
             and grounded
             and low_human_review
+            and not getattr(generator, "manual_review_required", False)
             and not unresolved
+            and not unresolved_ingredients
             and not unresolved_steps
         ):
             attempt_status = "approved"
@@ -1885,21 +1957,37 @@ def with_generated_step_review(
         latest = {
             **reviewed,
             "generation_summary": generated["summary"],
+            "ingredient_evidence": ingredient_evidence,
             "generation_status": attempt_status,
             "generation_attempts": attempts,
         }
-        if unresolved:
+        if getattr(generator, "manual_review_required", False):
+            latest["import_warnings"] = list(
+                dict.fromkeys(
+                    [
+                        *latest.get("import_warnings", []),
+                        "Geminiの動画解析候補です。保存前に動画と根拠を手動で照合してください",
+                    ]
+                )
+            )
+        if unresolved or unresolved_ingredients:
             latest["import_warnings"] = list(
                 dict.fromkeys(
                     [
                         *latest["import_warnings"],
-                        f"工程生成の未確認項目: {'／'.join(unresolved)}",
+                        *([f"材料の未確認項目: {'／'.join(item['ingredient'] for item in ingredient_evidence if item['unresolved'])}"] if unresolved_ingredients else []),
+                        *([f"工程生成の未確認項目: {'／'.join(unresolved)}"] if unresolved else []),
                     ]
                 )
             )
         if attempt_status == "approved":
             return latest
-        if review.get("status") == "unavailable" or not is_recipe or not source_complete:
+        if (
+            review.get("status") == "unavailable"
+            or not is_recipe
+            or not source_complete
+            or not ingredients_complete
+        ):
             return latest
         feedback = _step_review_feedback(review, threshold)
         if unresolved or unresolved_steps:
@@ -1908,7 +1996,9 @@ def with_generated_step_review(
             return latest
 
     warnings = list(latest.get("import_warnings") or [])
-    warnings.append("工程生成は3回のJev検品で承認されなかったため、手動確認が必要です")
+    warnings.append(
+        f"工程生成は{max_attempts}回のJev検品で承認されなかったため、手動確認が必要です"
+    )
     latest["import_warnings"] = list(dict.fromkeys(warnings))
     latest["generation_status"] = "review_required"
     return latest
@@ -1921,13 +2011,39 @@ def video_draft_from_html(
     caption_steps, caption_timestamps = caption_recipe_steps(caption_segments)
     structured = parse_json_ld_nodes(html)
     recipe_node = next((node for value in structured if (node := find_recipe_node(value))), None)
+    video_node = next(
+        (node for value in structured if (node := find_typed_node(value, "VideoObject"))),
+        None,
+    )
     youtube = youtube_player_metadata(html)
+    metadata = PageMetadataParser()
+    metadata.feed(html)
+    description_candidates = [
+        youtube["description"],
+        str((recipe_node or {}).get("description") or "").strip(),
+        str((video_node or {}).get("description") or "").strip(),
+        metadata.metadata.get("og:description", ""),
+        metadata.metadata.get("twitter:description", ""),
+        metadata.metadata.get("description", ""),
+    ]
+    full_description = max(description_candidates, key=len, default="")
     if recipe_node:
         draft = recipe_draft_from_node(recipe_node, url, url)
-        full_description = youtube["description"]
         servings, ingredients, steps = extract_description_recipe(full_description)
-        if not draft["ingredients"] and ingredients:
-            draft["ingredients"] = ingredients
+        if ingredients:
+            description_names = {
+                re.sub(r"\s+", "", unicodedata.normalize("NFKC", item["name"])).casefold()
+                for item in ingredients
+            }
+            structured_only = [
+                item
+                for item in draft["ingredients"]
+                if re.sub(
+                    r"\s+", "", unicodedata.normalize("NFKC", item["name"])
+                ).casefold()
+                not in description_names
+            ]
+            draft["ingredients"] = [*ingredients, *structured_only]
         if not draft["steps"] and steps:
             clean_steps, timestamps = steps_with_video_timestamps(steps)
             draft["steps"] = clean_steps
@@ -1952,23 +2068,10 @@ def video_draft_from_html(
             ]
         return result
 
-    video_node = next(
-        (node for value in structured if (node := find_typed_node(value, "VideoObject"))),
-        None,
-    )
-    metadata = PageMetadataParser()
-    metadata.feed(html)
     title = youtube["title"] or str((video_node or {}).get("name") or "").strip()
     if not title:
         title = metadata.metadata.get("og:title") or metadata.metadata.get("twitter:title") or metadata.title
-    description_candidates = [
-        youtube["description"],
-        str((video_node or {}).get("description") or "").strip(),
-        metadata.metadata.get("og:description", ""),
-        metadata.metadata.get("twitter:description", ""),
-        metadata.metadata.get("description", ""),
-    ]
-    description = max(description_candidates, key=len, default="")
+    description = full_description
     image = youtube["image"] or (video_node or {}).get("thumbnailUrl", "")
     if isinstance(image, list):
         image = image[0] if image else ""
@@ -2038,7 +2141,7 @@ def import_video(
         except ValueError:
             caption_segments = []
     draft = video_draft_from_html(url, html, caption_segments)
-    if reviewer is None:
+    if reviewer is None and generator is None:
         return draft
     description = youtube_player_metadata(html)["description"] or draft["description"]
     transcript = caption_source_text(caption_segments)
@@ -2046,7 +2149,13 @@ def import_video(
         part for part in (description, f"公開字幕:\n{transcript}" if transcript else "") if part
     )[:30_000]
     if generator is not None:
-        return with_generated_step_review(draft, source_text, generator, reviewer)
+        return with_generated_step_review(
+            draft,
+            source_text,
+            generator,
+            reviewer,
+            max_attempts=1 if getattr(generator, "manual_review_required", False) else 3,
+        )
     return with_jev_import_review(draft, source_text, reviewer)
 
 
@@ -2236,7 +2345,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 draft = create_normalized_draft(self.store, recipe, mealie_slug)
                 self.json_response(draft, HTTPStatus.CREATED)
             elif self.path == "/api/recipes":
-                self.json_response(self.store.save(self.body()), HTTPStatus.CREATED)
+                self.json_response(
+                    self.store.save(validate_video_recipe_save(self.body())),
+                    HTTPStatus.CREATED,
+                )
             elif self.path == "/api/import":
                 data = self.body()
                 self.json_response(import_recipe(str(data.get("url", ""))))
@@ -2296,6 +2408,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 recipe = self.store.get(recipe_id)
                 if not recipe:
                     self.json_response({"error": "同期する下書きが見つかりません"}, 404)
+                    return
+                try:
+                    require_video_recipe_steps(recipe)
+                except ValueError as exc:
+                    self.json_response({"error": str(exc)}, 409)
                     return
                 if not recipe["servings_confirmed"]:
                     self.json_response(
@@ -2558,7 +2675,9 @@ class AppHandler(BaseHTTPRequestHandler):
             if not self.store.get(match.group(1)):
                 self.json_response({"error": "レシピが見つかりません"}, 404)
                 return
-            self.json_response(self.store.save(self.body(), match.group(1)))
+            self.json_response(
+                self.store.save(validate_video_recipe_save(self.body()), match.group(1))
+            )
         except ValueError as exc:
             self.json_response({"error": str(exc)}, 400)
 
@@ -2614,20 +2733,20 @@ def make_server(host: str, port: int, db_path: Path) -> ThreadingHTTPServer:
                 max_response_bytes=500_000,
             )
         )
-    if runtime.openai_generation_enabled:
-        if jev_reviewer is None:
-            raise ValueError("OpenAI工程生成を有効にするにはJev検品も有効にしてください")
-        openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-        if not openai_api_key:
-            raise ValueError("OpenAI工程生成を有効にするにはOpenAI API keyが必要です")
-        step_generator = OpenAIRecipeStepGenerator(
+    if runtime.gemini_video_analysis_enabled:
+        gemini_api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if not gemini_api_key:
+            raise ValueError("Gemini動画解析を有効にするにはGemini API keyが必要です")
+        step_generator = GeminiVideoAnalyzer(
             UrllibJsonTransport(
-                "https://api.openai.com",
-                openai_api_key,
-                timeout=60,
+                "https://generativelanguage.googleapis.com/v1beta",
+                gemini_api_key,
+                timeout=180,
                 max_response_bytes=1_000_000,
+                auth_header_name="x-goog-api-key",
+                auth_prefix="",
             ),
-            model=runtime.openai_model,
+            model=runtime.gemini_model,
         )
     if runtime.mode in {"stage", "prototype"}:
         recipe_reader: RecipeReader = MockMealieCatalog(MOCK_MEALIE_FIXTURE)

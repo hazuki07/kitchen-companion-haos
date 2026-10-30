@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "kitchen_companion"))
@@ -82,6 +83,38 @@ class JevRecipeImportReviewerTests(unittest.TestCase):
             "https://api.typesafe.ai", "fictional-jev-secret", max_response_bytes=500_000
         )
         self.assertNotIn("fictional-jev-secret", repr(transport))
+
+    def test_api_key_transport_uses_configured_header_without_bearer(self) -> None:
+        class Response:
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, _size: int) -> bytes:
+                return b"{}"
+
+        class Opener:
+            def open(self, request, timeout):
+                self.request = request
+                return Response()
+
+        opener = Opener()
+        transport = UrllibJsonTransport(
+            "https://generativelanguage.googleapis.com/v1beta",
+            "fictional-gemini-secret",
+            auth_header_name="x-goog-api-key",
+            auth_prefix="",
+        )
+        with patch("app.clients.build_opener", return_value=opener):
+            transport.request("POST", "/interactions", body={})
+
+        self.assertEqual(opener.request.get_header("X-goog-api-key"), "fictional-gemini-secret")
+        self.assertIsNone(opener.request.get_header("Authorization"))
+        self.assertNotIn("fictional-gemini-secret", opener.request.full_url)
 
     def test_low_step_coverage_requires_review(self) -> None:
         transport = RecordingTransport(successful_response(source_steps_complete=0.2))

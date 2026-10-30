@@ -88,6 +88,8 @@ class UrllibJsonTransport:
     token: str = field(repr=False)
     timeout: float = 10
     max_response_bytes: int = 5_000_000
+    auth_header_name: str = "Authorization"
+    auth_prefix: str = "Bearer "
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.base_url)
@@ -95,8 +97,13 @@ class UrllibJsonTransport:
             raise ValueError("接続先URLが正しくありません")
         if not self.token:
             raise ValueError("接続tokenが設定されていません")
+        if not re.fullmatch(r"[A-Za-z0-9-]+", self.auth_header_name):
+            raise ValueError("認証header名が正しくありません")
         if not 1 <= self.max_response_bytes <= 10_000_000:
             raise ValueError("JSON応答サイズ上限が正しくありません")
+
+    def _auth_header(self) -> dict[str, str]:
+        return {self.auth_header_name: f"{self.auth_prefix}{self.token}"}
 
     def request(
         self,
@@ -117,7 +124,7 @@ class UrllibJsonTransport:
             data=payload,
             method=method,
             headers={
-                "Authorization": f"Bearer {self.token}",
+                **self._auth_header(),
                 "Accept": "application/json",
                 "Content-Type": "application/json",
             },
@@ -140,7 +147,7 @@ class UrllibJsonTransport:
         request = Request(
             f"{self.base_url.rstrip('/')}{path}",
             method="GET",
-            headers={"Authorization": f"Bearer {self.token}", "Accept": "image/*"},
+            headers={**self._auth_header(), "Accept": "image/*"},
         )
         try:
             with build_opener(RejectRedirectHandler()).open(request, timeout=self.timeout) as response:

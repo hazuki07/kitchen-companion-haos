@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "kitchen_companion"))
 
 from app.clients import IntegrationError  # noqa: E402
-from app.generation import OpenAIRecipeStepGenerator  # noqa: E402
+from app.generation import GeminiVideoAnalyzer  # noqa: E402
 
 
 class RecordingTransport:
@@ -42,109 +42,76 @@ def response_with(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-class OpenAIRecipeStepGeneratorTests(unittest.TestCase):
-    def test_generates_schema_bound_summary_before_steps(self) -> None:
-        transport = RecordingTransport(
-            response_with(
-                {
-                    "summary": "架空食材を切って煮る料理。",
-                    "steps": [
-                        {
-                            "text": "架空食材を切る。",
-                            "start_seconds": 15,
-                            "evidence": "[15s] 架空食材を切ります",
-                            "unresolved": False,
-                        }
-                    ],
-                    "unresolved": [],
-                }
-            )
+class GeminiVideoAnalyzerTests(unittest.TestCase):
+    def test_analyzes_public_youtube_video_with_structured_output(self) -> None:
+        response = response_with(
+            {
+                "summary": "架空食材を煮る料理。",
+                "ingredients": [
+                    {
+                        "text": "架空食材 100g",
+                        "evidence": "架空食材 100g",
+                        "source": "description",
+                        "start_seconds": None,
+                        "unresolved": False,
+                    }
+                ],
+                "steps": [
+                    {
+                        "text": "架空食材を煮る。",
+                        "start_seconds": 15,
+                        "evidence": "架空食材を鍋で煮ます",
+                        "unresolved": False,
+                    }
+                ],
+                "unresolved": [],
+            }
         )
-        generator = OpenAIRecipeStepGenerator(transport)
+        transport = RecordingTransport(response)
+        analyzer = GeminiVideoAnalyzer(transport)
 
-        result = generator.generate(
-            "[15s] 架空食材を切ります",
+        result = analyzer.generate(
+            "概要欄:\n架空食材 100g",
             {
                 "title": "架空料理",
+                "video_url": "https://www.youtube.com/watch?v=AbCdEfGhI12",
                 "ingredients": [],
                 "steps": [],
-                "image_url": "https://i.ytimg.com/vi/AbCdEfGhI12/maxresdefault.jpg",
             },
         )
 
-        self.assertEqual(result["summary"], "架空食材を切って煮る料理。")
+        self.assertEqual(result["ingredients"][0]["text"], "架空食材 100g")
         self.assertEqual(result["steps"][0]["start_seconds"], 15)
         call = transport.calls[0]
-        self.assertEqual((call["method"], call["path"]), ("POST", "/v1/responses"))
-        self.assertEqual(call["body"]["model"], "gpt-6-luna")
-        self.assertTrue(call["body"]["text"]["format"]["strict"])
-        self.assertEqual(call["body"]["text"]["format"]["type"], "json_schema")
-        content = call["body"]["input"][1]["content"]
-        self.assertEqual(content[0]["type"], "input_text")
-        self.assertEqual(content[1], {
-            "type": "input_image",
-            "image_url": "https://i.ytimg.com/vi/AbCdEfGhI12/maxresdefault.jpg",
-            "detail": "low",
+        self.assertEqual((call["method"], call["path"]), ("POST", "/interactions"))
+        self.assertFalse(call["body"]["store"])
+        self.assertEqual(call["body"]["input"][0], {
+            "type": "video",
+            "uri": "https://www.youtube.com/watch?v=AbCdEfGhI12",
         })
-
-    def test_includes_fixed_review_feedback_in_next_generation(self) -> None:
-        transport = RecordingTransport(
-            response_with(
-                {
-                    "summary": "架空の要約。",
-                    "steps": [],
-                    "unresolved": ["加熱時間"],
-                }
-            )
-        )
-        generator = OpenAIRecipeStepGenerator(transport)
-
-        generator.generate(
-            "架空の出典",
-            {"title": "架空料理", "ingredients": [], "steps": []},
-            ["工程を出典だけから作り直してください"],
-        )
-
-        content = transport.calls[0]["body"]["input"][1]["content"]
-        state = json.loads(content[0]["text"])
+        self.assertEqual(call["body"]["response_format"]["mime_type"], "application/json")
+        self.assertTrue(call["body"]["response_format"]["schema"]["required"])
+        step_schema = call["body"]["response_format"]["schema"]["properties"]["steps"]
         self.assertEqual(
-            state["review_feedback"],
-            ["工程を出典だけから作り直してください"],
+            step_schema["items"]["properties"]["start_seconds"]["type"],
+            ["integer", "null"],
         )
 
-    def test_does_not_send_non_youtube_or_private_image_url(self) -> None:
-        transport = RecordingTransport(
-            response_with({"summary": "架空の要約。", "steps": [], "unresolved": []})
-        )
-        generator = OpenAIRecipeStepGenerator(transport)
+    def test_rejects_non_video_youtube_urls_before_api_call(self) -> None:
+        transport = RecordingTransport(response_with({}))
+        analyzer = GeminiVideoAnalyzer(transport)
 
-        generator.generate(
-            "架空の出典",
-            {
-                "title": "架空料理",
-                "ingredients": [],
-                "steps": [],
-                "image_url": "https://192.168.50.175/private-thumbnail.jpg",
-            },
-        )
-
-        content = transport.calls[0]["body"]["input"][1]["content"]
-        self.assertEqual([item["type"] for item in content], ["input_text"])
-
-    def test_rejects_refusal_or_malformed_step(self) -> None:
-        refusal = RecordingTransport(
-            {"status": "completed", "output": [{"type": "message", "content": [
-                {"type": "refusal", "refusal": "fictional refusal"}
-            ]}]}
-        )
         with self.assertRaises(IntegrationError):
-            OpenAIRecipeStepGenerator(refusal).generate("架空の出典", {"title": "架空料理"})
+            analyzer.generate(
+                "",
+                {
+                    "video_url": "https://www.youtube.com/redirect?url=https://127.0.0.1/",
+                    "ingredients": [],
+                    "steps": [],
+                },
+            )
 
-        malformed = RecordingTransport(
-            response_with({"summary": "架空の要約", "steps": [{}], "unresolved": []})
-        )
-        with self.assertRaises(IntegrationError):
-            OpenAIRecipeStepGenerator(malformed).generate("架空の出典", {"title": "架空料理"})
+        self.assertEqual(transport.calls, [])
 
 
 if __name__ == "__main__":
