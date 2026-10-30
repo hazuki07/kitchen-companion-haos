@@ -184,6 +184,54 @@ class RecipeTests(unittest.TestCase):
             self.assertEqual(review["counts"]["duplicate"], 1)
             self.assertEqual(review["entries"][0]["duplicate_title"], "既存の架空レシピ")
 
+    def test_review_bundle_allows_distinct_recipes_from_one_article(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            catalog = CombinedRecipeCatalog(MockMealieCatalog(MOCK_MEALIE_FIXTURE), store)
+            recipes = [
+                {
+                    **self.reviewed_bundle_recipe(),
+                    "title": "架空のピザ生地",
+                    "video_url": "",
+                    "source_url": "https://example.com/foodie/123/#recipe=pizza-dough",
+                },
+                {
+                    **self.reviewed_bundle_recipe(),
+                    "title": "架空のマルゲリータ",
+                    "video_url": "",
+                    "source_url": "https://example.com/foodie/123/#recipe=margherita",
+                },
+            ]
+
+            review = preview_review_bundle({"recipes": recipes}, catalog)
+
+            self.assertEqual(review["counts"]["candidate"], 2)
+            self.assertEqual(review["counts"]["duplicate"], 0)
+
+    def test_review_bundle_normalizes_matching_article_recipe_fragments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            store.save(
+                {
+                    **self.reviewed_bundle_recipe(),
+                    "title": "既存の架空ピザ生地",
+                    "video_url": "",
+                    "source_url": "https://www.example.com/foodie/123#recipe=Pizza_Dough",
+                }
+            )
+            catalog = CombinedRecipeCatalog(MockMealieCatalog(MOCK_MEALIE_FIXTURE), store)
+            candidate = {
+                **self.reviewed_bundle_recipe(),
+                "video_url": "",
+                "source_url": "https://example.com/foodie/123/#recipe=pizza_dough",
+            }
+
+            review = preview_review_bundle({"recipes": [candidate]}, catalog)
+
+            self.assertEqual(review["counts"]["candidate"], 0)
+            self.assertEqual(review["counts"]["duplicate"], 1)
+            self.assertEqual(review["entries"][0]["duplicate_title"], "既存の架空ピザ生地")
+
     def test_review_bundle_saves_unconfirmed_servings_for_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = RecipeStore(Path(directory) / "recipes.sqlite3")
