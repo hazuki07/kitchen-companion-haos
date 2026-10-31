@@ -362,6 +362,9 @@ async function loadRuntime() {
     ? ` · Gemini動画解析（${state.runtime.gemini_model}）`
     : "";
   $("#runtimeStatus").innerHTML = `<span></span> ${escapeHtml(state.runtime.label + generationLabel + jevLabel)}`;
+  $("#videoImportHelp").textContent = state.runtime.gemini_video_analysis_enabled
+    ? "公開YouTube動画をGeminiで解析し、材料・工程・根拠を候補として表示します。内容を照合してから保存してください。"
+    : "公開概要欄・公開字幕から材料と工程を候補として読み込みます。取得できない項目は、内容を確認して入力してください。";
   renderCatalogStatus();
 }
 
@@ -970,22 +973,30 @@ function openEditor(recipe = null, videoOnly = false) {
   const generationMessage = generationStatus
     ? `動画要約・工程生成：${generationStatus}（${recipe.generation_attempts?.length || 0}回）${recipe.generation_summary ? `\n要約：${recipe.generation_summary}` : ""}`
     : "";
-  const ingredientEvidenceMessage = Array.isArray(recipe?.ingredient_evidence)
-    ? `材料候補の根拠：\n${recipe.ingredient_evidence.slice(0, 30).map((item) => {
-      const source = item.source === "video" ? "動画" : item.source === "description" ? "概要欄" : "未確認";
-      const timestamp = Number.isInteger(item.start_seconds)
-        ? ` ${formatVideoTimestamp(item.start_seconds)}`
-        : "";
-      return `${item.ingredient} ← ${item.evidence || "根拠なし"}（${source}${timestamp}）`;
-    }).join("\n")}`
-    : "";
+  const ingredientEvidence = Array.isArray(recipe?.ingredient_evidence)
+    ? recipe.ingredient_evidence.slice(0, 30)
+    : [];
+  const evidenceDetails = $("#ingredientEvidence");
+  evidenceDetails.classList.toggle("hidden", ingredientEvidence.length === 0);
+  $("#ingredientEvidenceSummary").textContent = `材料候補の根拠を確認（${ingredientEvidence.length}件）`;
+  $("#ingredientEvidenceList").innerHTML = ingredientEvidence.map((item) => {
+    const source = item.source === "video" ? "動画" : item.source === "description" ? "概要欄" : "未確認";
+    const timestamp = Number.isInteger(item.start_seconds)
+      ? formatVideoTimestamp(item.start_seconds)
+      : "";
+    const metadata = [source, timestamp, item.unresolved ? "未確認" : ""]
+      .filter(Boolean)
+      .join(" · ");
+    return `<li><strong>${escapeHtml(item.ingredient || "")}</strong><span>${escapeHtml(item.evidence || "根拠なし")} · ${escapeHtml(metadata)}</span></li>`;
+  }).join("");
   const missingVideoStepsMessage = recipe?.video_url && !recipe?.steps?.length
-    ? "工程を取得できていません。取り込みは動画映像・音声を直接解析せず、概要欄と公開字幕を使います。工程を1件以上入力するまで保存できません。"
+    ? state.runtime?.gemini_video_analysis_enabled
+      ? "Geminiで動画を解析しましたが、工程候補を取得できていません。動画と概要欄を確認して工程を入力してください。工程を1件以上入力するまで保存できません。"
+      : "Gemini動画解析は無効です。公開概要欄・字幕から工程を取得できていません。工程を1件以上入力するまで保存できません。"
     : "";
   $("#formMessage").textContent = [
     importWarnings.length ? `要確認：${importWarnings.join("／")}` : "",
     generationMessage,
-    ingredientEvidenceMessage,
     missingVideoStepsMessage,
     ingredientComparisonMessage,
     comparisonMessage,
