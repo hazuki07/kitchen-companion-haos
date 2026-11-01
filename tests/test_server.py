@@ -44,16 +44,17 @@ from app.server import (  # noqa: E402
     fetch_youtube_caption_segments,
     find_recipe_node,
     flatten_steps,
-    ingredient_amounts_match,
     import_video,
+    ingredient_amounts_match,
     make_server,
     parse_ingredient,
     parse_video_timestamp,
     prepare_local_youtube_reimport,
     preview_review_bundle,
+    recipe_list_drafts_from_html,
+    require_video_recipe_steps,
     save_review_bundle,
     validate_recipe,
-    require_video_recipe_steps,
     validate_video_recipe_save,
     video_draft_from_html,
     with_generated_step_review,
@@ -231,6 +232,71 @@ class RecipeTests(unittest.TestCase):
             self.assertEqual(review["counts"]["candidate"], 0)
             self.assertEqual(review["counts"]["duplicate"], 1)
             self.assertEqual(review["entries"][0]["duplicate_title"], "既存の架空ピザ生地")
+
+    def test_kaneishi_recipe_list_parser_splits_recipes_and_preserves_groups(self) -> None:
+        html = """
+        <section class="recipe_single all_show">
+          <a id="recipe_list_recipe_1"></a>
+          <h3 class="recipe_list_h3">架空の煮物</h3>
+          <p class="recipe_list_description">公開ページの説明</p>
+          <p class="rl_hashu">#煮る #魚介</p>
+          <img src="/common/img/recipe-list/fictional.jpg">
+          <h4 class="recipe_list_material_h4">材料（2人分）</h4>
+          <p>【A】<br>架空魚<span class="material_detail">2切れ</span><br>
+             酒、塩<span class="material_detail">各少々</span></p>
+          <p>【B】<br>だし汁<span class="material_detail">1.5〜2カップ</span></p>
+          <h4 class="recipe_list_material_h4">作り方</h4>
+          <ol><li>架空魚を切る。</li><li>だし汁で煮る。</li></ol>
+        </section>
+        <section class="recipe_single all_show">
+          <a id="recipe_list_recipe_2"></a>
+          <h3 class="recipe_list_h3">架空の漬物</h3>
+          <p class="recipe_list_description">基準人数なし</p>
+          <h4 class="recipe_list_material_h4">材料</h4>
+          <p>架空野菜<span class="material_detail">適量</span></p>
+          <h4 class="recipe_list_material_h4">作り方</h4>
+          <ol><li>架空野菜を漬ける。</li></ol>
+        </section>
+        """
+
+        recipes = recipe_list_drafts_from_html("https://example.com/recipe-list/", html)
+
+        self.assertEqual([recipe["title"] for recipe in recipes], ["架空の煮物", "架空の漬物"])
+        self.assertEqual(recipes[0]["servings"], 2)
+        self.assertTrue(recipes[0]["servings_confirmed"])
+        self.assertEqual(len(recipes[0]["ingredients"]), 4)
+        self.assertEqual(
+            [item["name"] for item in recipes[0]["ingredients"]],
+            ["架空魚", "酒", "塩", "だし汁"],
+        )
+        self.assertEqual(
+            [item["note"] for item in recipes[0]["ingredients"]],
+            ["A", "A／少々", "A／少々", "B"],
+        )
+        self.assertEqual(recipes[0]["ingredients"][3]["amount_max"], 2)
+        self.assertEqual(recipes[0]["steps"], ["架空魚を切る。", "だし汁で煮る。"])
+        self.assertEqual(recipes[0]["source_url"], "https://example.com/recipe-list/#recipe_list_recipe_1")
+        self.assertFalse(recipes[1]["servings_confirmed"])
+        self.assertEqual(recipes[1]["unresolved_fields"], ["基準人数は未確認"])
+
+    def test_review_bundle_distinguishes_recipe_list_anchors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = RecipeStore(Path(directory) / "recipes.sqlite3")
+            catalog = CombinedRecipeCatalog(MockMealieCatalog(MOCK_MEALIE_FIXTURE), store)
+            recipes = [
+                {
+                    **self.reviewed_bundle_recipe(),
+                    "title": f"架空レシピ{index}",
+                    "video_url": "",
+                    "source_url": f"https://example.com/recipe-list/#recipe_list_recipe_{index}",
+                }
+                for index in (1, 2)
+            ]
+
+            review = preview_review_bundle({"recipes": recipes}, catalog)
+
+            self.assertEqual(review["counts"]["candidate"], 2)
+            self.assertEqual(review["counts"]["duplicate"], 0)
 
     def test_review_bundle_saves_unconfirmed_servings_for_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -755,6 +821,10 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(parse_ingredient("鶏もも肉 300g")["unit"], "g")
         self.assertEqual(parse_ingredient("しょうゆ 大さじ1")["amount"], 1)
         self.assertEqual(parse_ingredient("しょうゆ 大さじ1")["name"], "しょうゆ")
+        slice_item = parse_ingredient("白身魚 2切れ")
+        self.assertEqual(slice_item["amount"], 2)
+        self.assertEqual(slice_item["unit"], "切れ")
+        self.assertEqual(slice_item["name"], "白身魚")
 
     def test_concatenated_range_and_qualitative_ingredients(self) -> None:
         onion = parse_ingredient("玉ねぎ1〜2個")

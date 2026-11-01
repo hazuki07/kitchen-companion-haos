@@ -1050,13 +1050,21 @@ async function saveRecipe(event) {
 
 async function importFromUrl(event) {
   event.preventDefault();
+  state.bundleImport = null;
+  $("#bundleReview").classList.add("hidden");
+  $("#saveBundleButton").classList.add("hidden");
   const button = event.currentTarget.querySelector("button");
   button.disabled = true;
   button.textContent = "読み込み中…";
   try {
     const draft = await api("/api/import", { method: "POST", body: JSON.stringify({ url: $("#importUrl").value }) });
-    openEditor(draft);
-    showToast("内容を確認して保存してください");
+    if (Array.isArray(draft.recipes)) {
+      await previewRecipeBundlePayload(draft, button);
+      showToast(`${draft.recipes.length}件を抽出しました。重複と未確認項目を確認してください`);
+    } else {
+      openEditor(draft);
+      showToast("内容を確認して保存してください");
+    }
   } catch (error) { showToast(error.message); }
   finally { button.disabled = false; button.textContent = "内容を読み込む"; }
 }
@@ -1102,6 +1110,37 @@ function renderBundleReview(review) {
   saveButton.classList.toggle("hidden", !counts.candidate);
 }
 
+async function previewRecipeBundlePayload(sourcePayload, button) {
+  if (!sourcePayload || !Array.isArray(sourcePayload.recipes) || !sourcePayload.recipes.length) {
+    throw new Error("recipesが必要です");
+  }
+  if (sourcePayload.recipes.length > 400) {
+    throw new Error("一度に確認できるレシピは400件までです");
+  }
+  const batches = [];
+  for (let offset = 0; offset < sourcePayload.recipes.length; offset += 20) {
+    const payload = { ...sourcePayload, recipes: sourcePayload.recipes.slice(offset, offset + 20) };
+    button.textContent = `確認中… ${batches.length + 1}/${Math.ceil(sourcePayload.recipes.length / 20)}`;
+    const review = await api("/api/import/bundle/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    batches.push({ payload, review });
+  }
+  const review = {
+    entries: batches.flatMap((batch) => batch.review.entries || []),
+    counts: batches.reduce((total, batch) => {
+      for (const key of ["total", "candidate", "duplicate", "unresolved"]) {
+        total[key] += Number(batch.review.counts?.[key] || 0);
+      }
+      return total;
+    }, { total: 0, candidate: 0, duplicate: 0, unresolved: 0 }),
+    batch_count: batches.length,
+  };
+  state.bundleImport = { batches, review };
+  renderBundleReview(review);
+}
+
 async function previewBundleImport(event) {
   event.preventDefault();
   const file = $("#bundleImportFile").files[0];
@@ -1115,34 +1154,7 @@ async function previewBundleImport(event) {
   button.textContent = "確認中…";
   try {
     const sourcePayload = JSON.parse(await file.text());
-    if (!sourcePayload || !Array.isArray(sourcePayload.recipes) || !sourcePayload.recipes.length) {
-      throw new Error("recipesが必要です");
-    }
-    if (sourcePayload.recipes.length > 400) {
-      throw new Error("一度に確認できるレシピは400件までです");
-    }
-    const batches = [];
-    for (let offset = 0; offset < sourcePayload.recipes.length; offset += 20) {
-      const payload = { ...sourcePayload, recipes: sourcePayload.recipes.slice(offset, offset + 20) };
-      button.textContent = `確認中… ${batches.length + 1}/${Math.ceil(sourcePayload.recipes.length / 20)}`;
-      const review = await api("/api/import/bundle/preview", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      batches.push({ payload, review });
-    }
-    const review = {
-      entries: batches.flatMap((batch) => batch.review.entries || []),
-      counts: batches.reduce((total, batch) => {
-        for (const key of ["total", "candidate", "duplicate", "unresolved"]) {
-          total[key] += Number(batch.review.counts?.[key] || 0);
-        }
-        return total;
-      }, { total: 0, candidate: 0, duplicate: 0, unresolved: 0 }),
-      batch_count: batches.length,
-    };
-    state.bundleImport = { batches, review };
-    renderBundleReview(review);
+    await previewRecipeBundlePayload(sourcePayload, button);
   } catch (error) {
     state.bundleImport = null;
     $("#bundleReview").classList.add("hidden");

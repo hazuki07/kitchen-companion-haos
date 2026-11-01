@@ -1099,6 +1099,10 @@ def canonical_recipe_source(recipe: dict[str, Any]) -> str:
             identity = f"url:{parsed.scheme.casefold()}://{hostname}{port}{path}"
             fragment_params = parse_qs(parsed.fragment, keep_blank_values=False)
             recipe_keys = fragment_params.get("recipe", [])
+            if not recipe_keys and re.fullmatch(
+                r"recipe_list_recipe_\d+(?:_\d+)*", parsed.fragment
+            ):
+                recipe_keys = [parsed.fragment]
             if recipe_keys:
                 recipe_key = re.sub(
                     r"[^a-z0-9_-]+", "-", recipe_keys[0].casefold()
@@ -1251,12 +1255,13 @@ def parse_ingredient(text: str) -> dict[str, Any]:
     original_text = str(text).strip()[:500]
     normalized = unicodedata.normalize("NFKC", original_text)
     normalized = normalized.replace("½", "1/2").replace("¼", "1/4").replace("¾", "3/4")
+    normalized = normalized.replace("∼", "〜")
     normalized = re.sub(r"^[\s・●◯○■□✓✔*\-]+", "", normalized).strip()
     number = r"\d+\s*/\s*\d+|\d+(?:\.\d+)?"
     amount_pattern = rf"(?P<low>{number})(?:\s*(?:〜|~|－|-)\s*(?P<high>{number}))?"
     unit_pattern = (
-        r"(?P<unit>大さじ|小さじ|カップ|cc|ml|mL|l|L|g|kg|個|本|枚|片|株|袋|缶|"
-        r"束|合|玉|丁|パック|つまみ)"
+        r"(?P<unit>大さじ|小さじ|カップ|パック|cm長さ|cm角|人分|cc|CC|ml|mL|"
+        r"kg|cm|切れ|かけ|つまみ|個|本|枚|片|株|袋|缶|束|合|玉|丁|杯|尾|房|把|l|L|g)"
     )
     separator = r"[\s:：・…]*"
     note_suffix = r"(?:\s*[（(](?P<note>[^）)]{1,100})[）)])?"
@@ -1353,6 +1358,217 @@ class PageMetadataParser(HTMLParser):
     @property
     def title(self) -> str:
         return " ".join(self.title_parts).strip()
+
+
+class KaneishiRecipeListParser(HTMLParser):
+    def __init__(self, source_url: str) -> None:
+        super().__init__()
+        self.source_url = source_url.split("#", 1)[0]
+        self.recipes: list[dict[str, Any]] = []
+        self.recipe: dict[str, Any] | None = None
+        self.section_depth = 0
+        self.capture = ""
+        self.capture_parts: list[str] = []
+        self.context = ""
+        self.in_material_paragraph = False
+        self.material_name_parts: list[str] = []
+        self.material_group = ""
+        self.in_amount = False
+        self.amount_parts: list[str] = []
+        self.pending_ingredient_name = ""
+        self.in_step = False
+        self.step_parts: list[str] = []
+
+    @staticmethod
+    def _classes(attrs: list[tuple[str, str | None]]) -> set[str]:
+        values = dict(attrs)
+        return set(str(values.get("class") or "").split())
+
+    @staticmethod
+    def _text(parts: list[str]) -> str:
+        return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.casefold()
+        classes = self._classes(attrs)
+        values = dict(attrs)
+        if tag == "section":
+            if self.recipe is not None:
+                self.section_depth += 1
+            elif "recipe_single" in classes:
+                self.recipe = {
+                    "title": "",
+                    "description": "",
+                    "anchor": "",
+                    "servings": 1,
+                    "servings_confirmed": False,
+                    "ingredients": [],
+                    "steps": [],
+                    "tags": [],
+                    "image_url": "",
+                }
+                self.section_depth = 1
+            return
+        if self.recipe is None:
+            return
+        anchor = str(values.get("id") or "")
+        if tag == "a" and re.fullmatch(r"recipe_list_recipe_\d+(?:_\d+)*", anchor):
+            self.recipe["anchor"] = anchor
+        elif tag == "h3" and "recipe_list_h3" in classes:
+            self.capture = "title"
+            self.capture_parts = []
+        elif tag == "h4" and "recipe_list_material_h4" in classes:
+            self.capture = "heading"
+            self.capture_parts = []
+        elif tag == "p" and "recipe_list_description" in classes:
+            self.capture = "description"
+            self.capture_parts = []
+        elif tag == "p" and "rl_hashu" in classes:
+            self.capture = "tags"
+            self.capture_parts = []
+        elif tag == "p" and self.context == "ingredients":
+            self.in_material_paragraph = True
+            self.material_name_parts = []
+        elif tag == "br" and self.in_material_paragraph:
+            self._material_break()
+        elif tag == "span" and "material_detail" in classes and self.in_material_paragraph:
+            self.pending_ingredient_name = self._text(self.material_name_parts)
+            self.material_name_parts = []
+            self.in_amount = True
+            self.amount_parts = []
+        elif tag == "li" and self.context == "steps":
+            self.in_step = True
+            self.step_parts = []
+        elif tag == "img" and not self.recipe["image_url"]:
+            source = str(values.get("src") or "")
+            if "/recipe-list/" in source:
+                self.recipe["image_url"] = urljoin(self.source_url, source)
+
+    def handle_data(self, data: str) -> None:
+        if self.recipe is None:
+            return
+        if self.capture:
+            self.capture_parts.append(data)
+        elif self.in_amount:
+            self.amount_parts.append(data)
+        elif self.in_material_paragraph:
+            self.material_name_parts.append(data)
+        elif self.in_step:
+            self.step_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.casefold()
+        if self.recipe is None:
+            return
+        if tag in {"h3", "h4", "p"} and self.capture:
+            value = self._text(self.capture_parts)
+            capture = self.capture
+            self.capture = ""
+            self.capture_parts = []
+            if capture == "title":
+                self.recipe["title"] = value
+            elif capture == "description":
+                self.recipe["description"] = value
+            elif capture == "tags":
+                self.recipe["tags"] = [
+                    item.removeprefix("#") for item in value.split() if item.startswith("#")
+                ]
+            elif capture == "heading":
+                if value.startswith("材料"):
+                    self.context = "ingredients"
+                    match = re.search(r"（\s*(\d+(?:\.\d+)?)\s*人分\s*）", value)
+                    if match:
+                        self.recipe["servings"] = float(match.group(1))
+                        self.recipe["servings_confirmed"] = True
+                elif value == "作り方":
+                    self.context = "steps"
+            return
+        if tag == "span" and self.in_amount:
+            self._add_ingredient(self.pending_ingredient_name, self._text(self.amount_parts))
+            self.in_amount = False
+            self.amount_parts = []
+            self.pending_ingredient_name = ""
+        elif tag == "p" and self.in_material_paragraph:
+            self._material_break()
+            self.in_material_paragraph = False
+        elif tag == "li" and self.in_step:
+            step = self._text(self.step_parts)
+            if step:
+                self.recipe["steps"].append(step)
+            self.in_step = False
+            self.step_parts = []
+        elif tag == "section":
+            self.section_depth -= 1
+            if self.section_depth == 0:
+                self._finish_recipe()
+
+    def _material_break(self) -> None:
+        value = self._text(self.material_name_parts)
+        group = re.fullmatch(r"【\s*([A-Za-z])\s*】", value)
+        if group:
+            self.material_group = group.group(1).upper()
+        self.material_name_parts = []
+
+    def _add_ingredient(self, name: str, amount: str) -> None:
+        if self.recipe is None or not name:
+            return
+        original = f"{name} {amount}".strip()
+        names = [name]
+        normalized_amount = amount
+        if amount.startswith("各") and re.search(r"[、,，]", name):
+            names = [item.strip() for item in re.split(r"[、,，]", name) if item.strip()]
+            normalized_amount = amount.removeprefix("各").strip()
+        for ingredient_name in names:
+            ingredient_amount = normalized_amount
+            qualifier = ""
+            qualified = re.fullmatch(r"([大小中])\s*(\d.+)", ingredient_amount)
+            if qualified:
+                qualifier, ingredient_amount = qualified.groups()
+            ingredient = parse_ingredient(f"{ingredient_name} {ingredient_amount}".strip())
+            ingredient["name"] = ingredient_name
+            if ingredient["amount"] is None and not ingredient["note"] and ingredient_amount:
+                ingredient["note"] = ingredient_amount
+            notes = [
+                value for value in (self.material_group, qualifier, ingredient["note"]) if value
+            ]
+            ingredient["note"] = "／".join(notes)
+            ingredient["original_text"] = original
+            self.recipe["ingredients"].append(ingredient)
+
+    def _finish_recipe(self) -> None:
+        if self.recipe is None:
+            return
+        recipe = self.recipe
+        self.recipe = None
+        self.context = ""
+        self.material_group = ""
+        if not recipe["title"] or not recipe["anchor"]:
+            return
+        unresolved = [] if recipe["servings_confirmed"] else ["基準人数は未確認"]
+        self.recipes.append(
+            {
+                "title": recipe["title"],
+                "description": recipe["description"],
+                "servings": recipe["servings"],
+                "servings_confirmed": recipe["servings_confirmed"],
+                "source_url": f"{self.source_url}#{recipe['anchor']}",
+                "image_url": recipe["image_url"],
+                "ingredients": recipe["ingredients"],
+                "steps": recipe["steps"],
+                "tags": [*recipe["tags"], "カネイシ", "いしり"],
+                "unresolved_fields": unresolved,
+            }
+        )
+
+
+def recipe_list_drafts_from_html(url: str, html: str) -> list[dict[str, Any]]:
+    parser = KaneishiRecipeListParser(url)
+    parser.feed(html)
+    parser.close()
+    return [
+        validate_recipe(recipe) | {"unresolved_fields": recipe["unresolved_fields"]}
+        for recipe in parser.recipes
+    ]
 
 
 def find_typed_node(value: Any, node_type: str) -> dict[str, Any] | None:
@@ -1980,11 +2196,17 @@ def with_generated_step_review(
                 )
             )
         if unresolved or unresolved_ingredients:
+            ingredient_warnings = []
+            if unresolved_ingredients:
+                ingredient_names = "／".join(
+                    item["ingredient"] for item in ingredient_evidence if item["unresolved"]
+                )
+                ingredient_warnings = [f"材料の未確認項目: {ingredient_names}"]
             latest["import_warnings"] = list(
                 dict.fromkeys(
                     [
                         *latest["import_warnings"],
-                        *([f"材料の未確認項目: {'／'.join(item['ingredient'] for item in ingredient_evidence if item['unresolved'])}"] if unresolved_ingredients else []),
+                        *ingredient_warnings,
                         *([f"工程生成の未確認項目: {'／'.join(unresolved)}"] if unresolved else []),
                     ]
                 )
@@ -2126,6 +2348,15 @@ def video_draft_from_html(
 
 def import_recipe(url: str) -> dict[str, Any]:
     url, html = fetch_public_html(url, "レシピサイト")
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").casefold().removeprefix("www.")
+    recipe_list = (
+        recipe_list_drafts_from_html(url, html)
+        if hostname == "kaneishi.com" and parsed.path.rstrip("/") == "/recipe-list"
+        else []
+    )
+    if recipe_list:
+        return {"recipes": recipe_list}
     node = None
     for value in parse_json_ld_nodes(html):
         node = find_recipe_node(value)
